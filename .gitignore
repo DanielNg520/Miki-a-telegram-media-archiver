@@ -1,0 +1,40 @@
+# ---- Secrets & personal configuration (NEVER commit) ----
+.env
+.env.*
+!.env.sample
+*.token
+secrets.json
+
+# ---- Runtime data (contains real chat IDs, message content, backups) ----
+var/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.backup-*
+backups/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# ---- Tooling caches ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- OS / editor cruft ----
+.DS_Store
+*.swp
+.idea/
+.vscode/
