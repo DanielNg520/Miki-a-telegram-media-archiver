@@ -116,6 +116,7 @@ def main() -> None:
     application.bot_data["integrations"] = integrations
     application.bot_data["operations"] = operations
     application.bot_data["settings"] = settings
+    _schedule_daily_backup(application, settings, operations, repositories)
     _add_management_handlers(application, management)
     application.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, sort_message))
     application.add_handler(
@@ -136,6 +137,69 @@ def main() -> None:
 
     LOGGER.info("Miki sorter is running.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+def _schedule_daily_backup(
+    application: Application,
+    settings,
+    operations: OperationsService,
+    repositories,
+) -> None:
+    if not settings.backup_daily_enabled:
+        return
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning(
+            "Daily backups requested but JobQueue is unavailable; "
+            "install python-telegram-bot[job-queue] to enable them.",
+        )
+        return
+
+    async def run_daily_backup(_: ContextTypes.DEFAULT_TYPE) -> None:
+        token = set_correlation_id("daily-backup")
+        try:
+            destination, pruned = operations.backup_and_prune(
+                keep=settings.backup_retention_count,
+            )
+            repositories.increment_metric("database_backups", 1)
+            repositories.add_audit_event(
+                actor_type="system",
+                actor_id="miki",
+                action="operations.backup.scheduled",
+                outcome="success",
+                resource_type="database_backup",
+                resource_id=destination.name,
+                details={"pruned": len(pruned)},
+            )
+            LOGGER.info(
+                "Daily backup created",
+                extra={"backup": destination.name, "pruned": len(pruned)},
+            )
+        except Exception:
+            repositories.increment_metric("database_backup_failures", 1)
+            repositories.add_audit_event(
+                actor_type="system",
+                actor_id="miki",
+                action="operations.backup.scheduled",
+                outcome="failed",
+                resource_type="database_backup",
+            )
+            LOGGER.exception("Daily backup failed")
+        finally:
+            reset_correlation_id(token)
+
+    job_queue.run_daily(
+        run_daily_backup,
+        time=settings.backup_time_utc,
+        name="daily-backup",
+    )
+    LOGGER.info(
+        "Scheduled daily backup",
+        extra={
+            "time_utc": settings.backup_time,
+            "retention": settings.backup_retention_count,
+        },
+    )
 
 
 def _add_management_handlers(

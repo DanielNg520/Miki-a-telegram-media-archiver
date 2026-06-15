@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, time
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -80,6 +81,9 @@ class Settings(BaseSettings):
         alias="INTEGRATION_SIGNATURE_TTL",
     )
     send_confirmation: bool = Field(default=False, alias="SEND_CONFIRMATION")
+    backup_daily_enabled: bool = Field(default=True, alias="BACKUP_DAILY_ENABLED")
+    backup_time: str = Field(default="03:00", alias="BACKUP_TIME")
+    backup_retention_count: int = Field(default=14, ge=1, alias="BACKUP_RETENTION_COUNT")
     routes: list[Route] = Field(default_factory=list, alias="ROUTES_JSON")
 
     @field_validator("routes", mode="before")
@@ -123,9 +127,27 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("backup_time")
+    @classmethod
+    def validate_backup_time(cls, value: str) -> str:
+        normalized = value.strip()
+        parts = normalized.split(":")
+        try:
+            hour, minute = (int(part) for part in parts)
+        except ValueError as error:
+            raise ValueError("BACKUP_TIME must be HH:MM in 24-hour UTC") from error
+        if len(parts) != 2 or not (0 <= hour < 24 and 0 <= minute < 60):
+            raise ValueError("BACKUP_TIME must be a valid 24-hour HH:MM time")
+        return f"{hour:02d}:{minute:02d}"
+
     @property
     def effective_request_chat_id(self) -> int:
         return self.request_chat_id or self.archive_chat_id
+
+    @property
+    def backup_time_utc(self) -> time:
+        hour, minute = (int(part) for part in self.backup_time.split(":"))
+        return time(hour=hour, minute=minute, tzinfo=UTC)
 
     @field_validator("bot_token")
     @classmethod

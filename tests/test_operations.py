@@ -56,6 +56,53 @@ def test_rapid_backups_use_distinct_verified_files(tmp_path) -> None:
     storage.close()
 
 
+def test_backup_and_prune_enforces_retention_window(tmp_path) -> None:
+    storage = Storage(tmp_path / "miki.sqlite3")
+    repositories = storage.open()
+    backups = tmp_path / "backups"
+    operations = OperationsService(
+        repositories,
+        storage,
+        backup_directory=backups,
+        transient_retention_days=30,
+        audit_retention_days=90,
+    )
+
+    created = []
+    for _ in range(5):
+        destination, pruned = operations.backup_and_prune(keep=3)
+        created.append(destination)
+        assert destination not in pruned
+
+    surviving = sorted(backups.glob("miki-*.sqlite3"))
+    assert len(surviving) == 3
+    # The three newest backups (by timestamped filename) are the ones retained.
+    assert surviving == sorted(created[-3:])
+    for path in surviving:
+        Storage.verify_database(path)
+    storage.close()
+
+
+def test_prune_backups_rejects_non_positive_keep(tmp_path) -> None:
+    storage = Storage(tmp_path / "miki.sqlite3")
+    storage.open()
+    operations = OperationsService(
+        storage.open(),
+        storage,
+        backup_directory=tmp_path / "backups",
+        transient_retention_days=30,
+        audit_retention_days=90,
+    )
+
+    try:
+        operations.prune_backups(0)
+    except ValueError:
+        pass
+    else:  # pragma: no cover - guard
+        raise AssertionError("expected ValueError for keep < 1")
+    storage.close()
+
+
 def test_delivery_metrics_cover_retry_failure_and_timing(tmp_path) -> None:
     storage = Storage(tmp_path / "miki.sqlite3")
     repositories = storage.open()

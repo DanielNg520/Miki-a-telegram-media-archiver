@@ -62,3 +62,29 @@ class OperationsService:
 
     def backup(self) -> Path:
         return self._storage.backup(self._backup_directory)
+
+    def prune_backups(self, keep: int) -> list[Path]:
+        """Delete all but the ``keep`` most recent verified backups.
+
+        Backup filenames embed a UTC timestamp (``miki-<ts>.sqlite3``), so a
+        reverse lexicographic sort is also reverse chronological order.
+        """
+
+        if keep < 1:
+            raise ValueError("keep must be at least 1")
+        backups = sorted(
+            self._backup_directory.glob("miki-*.sqlite3"),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        stale = backups[keep:]
+        for path in stale:
+            path.unlink(missing_ok=True)
+        return stale
+
+    def backup_and_prune(self, *, keep: int) -> tuple[Path, list[Path]]:
+        """Create a verified backup, then enforce the retention window."""
+
+        destination = self.backup()
+        pruned = self.prune_backups(keep)
+        return destination, pruned

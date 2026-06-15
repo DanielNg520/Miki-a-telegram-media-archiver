@@ -181,6 +181,15 @@ transport-neutral contract. Administrators can inspect recent events with `/audi
 ## Operations
 
 Administrators can use `/health`, `/status`, `/maintenance`, and `/backup`.
+
+A **daily automatic backup** runs in-process via the bot's job queue (no external
+cron needed). Each run takes a verified online SQLite snapshot (consistent under
+WAL, integrity-checked) into `BACKUP_DIRECTORY`, then prunes all but the
+`BACKUP_RETENTION_COUNT` most recent backups. Configure it with
+`BACKUP_DAILY_ENABLED`, `BACKUP_TIME` (24-hour `HH:MM`, UTC), and
+`BACKUP_RETENTION_COUNT`. A scheduled backup that fails is logged and counted in
+the `database_backup_failures` metric without interrupting the bot.
+
 Operational counters include Telegram retries and throttling, duplicate suppression,
 integration replay and quota rejection, and retrieval delivery totals. Review
 `docs/deployment.md`, `docs/phase_9_operations.md`, and `docs/release_readiness.md`

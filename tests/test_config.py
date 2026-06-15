@@ -116,5 +116,26 @@ class SettingsTests(unittest.TestCase):
             Settings(**values)
 
 
+    def test_backup_time_normalizes_and_exposes_utc_time(self) -> None:
+        values = _values()
+        values["BACKUP_TIME"] = "3:5"
+
+        settings = Settings(**values)
+
+        self.assertEqual(settings.backup_time, "03:05")
+        self.assertEqual(settings.backup_retention_count, 14)
+        self.assertTrue(settings.backup_daily_enabled)
+        self.assertEqual(settings.backup_time_utc.hour, 3)
+        self.assertEqual(settings.backup_time_utc.minute, 5)
+        self.assertIsNotNone(settings.backup_time_utc.tzinfo)
+
+    def test_rejects_invalid_backup_time(self) -> None:
+        values = _values()
+        values["BACKUP_TIME"] = "25:00"
+
+        with self.assertRaisesRegex(ValidationError, "BACKUP_TIME"):
+            Settings(**values)
+
+
 if __name__ == "__main__":
     unittest.main()
