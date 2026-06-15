@@ -46,8 +46,15 @@ Important IDs:
 - `REQUEST_TOPIC_IDS`: comma-separated topic IDs within `REQUEST_CHAT_ID` where retrieval requests
   are accepted.
 - `DEFAULT_REQUEST_LIMIT` and `MAX_REQUEST_LIMIT`: bounds for future retrieval jobs.
-- `LOG_LEVEL` and `LOG_FORMAT`: application logging controls (`json` is recommended).
+- `LOG_LEVEL` and `LOG_FORMAT`: application logging controls. Use `LOG_FORMAT=console` for a
+  readable local terminal, or `LOG_FORMAT=json` for structured hosted logs.
 - `SORT_DRY_RUN`: resolve and record routes without copying media.
+- `TELEGRAM_STARTUP_CHECKIN_ENABLED`: sends admins or `TELEGRAM_NOTIFICATION_CHAT_IDS` a startup
+  `/doctor` summary.
+- `HEALTH_SERVER_ENABLED`: starts optional `/healthz` and `/metrics` endpoints for polling/VPS
+  deployments.
+- `ERROR_REPORTING_DSN`: enables optional Sentry-style external exception reporting if
+  `sentry-sdk` is installed.
 - `ROUTES_JSON`: routing rules.
 
 `COLLECTOR_*` and `ROUTES_JSON` are legacy-compatible settings. The active sorter uses registered
@@ -130,6 +137,15 @@ miki-doctor
 It verifies configuration, database migrations, archive topic registration, route mappings, runtime
 mode, and outstanding operational warnings. It exits non-zero when required archive setup is missing.
 The same check is available to Telegram admins with `/doctor`.
+
+For a full local verification pass before deploying:
+
+```bash
+make verify
+```
+
+That runs the test suite, bytecode import compilation, dependency consistency checks, and
+`miki-doctor`.
 
 For Render/Koyeb webhook hosting, see `docs/hosted_webhook_deployment.md`.
 

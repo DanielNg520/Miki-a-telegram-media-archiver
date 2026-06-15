@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
 import pytest
 
+from miki_sorter_bot.indexing import MessageIndexer
 from miki_sorter_bot.repositories import SqliteRepositories, normalize_mapping
 
 
@@ -135,6 +139,40 @@ def test_mapping_namespaces_are_isolated_by_chat(database_connection) -> None:
     second = repositories.add_mapping(-200, 7, "keyword", "ABC", 20)
 
     assert first.id != second.id
+
+
+def test_counts_recent_source_posts(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    message = SimpleNamespace(
+        message_id=12,
+        message_thread_id=7,
+        media_group_id=None,
+        caption="#JAV",
+        text=None,
+        date=datetime(2026, 6, 15, tzinfo=UTC),
+        from_user=SimpleNamespace(id=10, is_bot=False),
+        photo=[object()],
+        animation=None,
+        audio=None,
+        document=None,
+        sticker=None,
+        video=None,
+        video_note=None,
+        voice=None,
+    )
+    indexer.index(message, -100)
+
+    assert repositories.count_recent_source_posts(
+        -100,
+        7,
+        datetime(2026, 6, 14, tzinfo=UTC).isoformat(),
+    ) == 1
+    assert repositories.count_recent_source_posts(
+        -100,
+        7,
+        datetime(2026, 6, 16, tzinfo=UTC).isoformat(),
+    ) == 0
 
 
 def test_replace_mapping_moves_it_between_topics(database_connection) -> None:

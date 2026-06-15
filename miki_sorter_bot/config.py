@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     default_request_limit: int = Field(default=20, gt=0, alias="DEFAULT_REQUEST_LIMIT")
     max_request_limit: int = Field(default=100, gt=0, alias="MAX_REQUEST_LIMIT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    log_format: str = Field(default="json", alias="LOG_FORMAT")
+    log_format: str = Field(default="console", alias="LOG_FORMAT")
     sort_dry_run: bool = Field(default=False, alias="SORT_DRY_RUN")
     telegram_retry_attempts: int = Field(default=3, ge=1, le=10, alias="TELEGRAM_RETRY_ATTEMPTS")
     telegram_retry_base_delay: float = Field(default=0.5, ge=0, alias="TELEGRAM_RETRY_BASE_DELAY")
@@ -74,6 +74,14 @@ class Settings(BaseSettings):
         default=10.0,
         gt=0,
         alias="TELEGRAM_MESSAGES_PER_SECOND",
+    )
+    telegram_startup_checkin_enabled: bool = Field(
+        default=False,
+        alias="TELEGRAM_STARTUP_CHECKIN_ENABLED",
+    )
+    telegram_notification_chat_ids: Annotated[frozenset[int], NoDecode] = Field(
+        default_factory=frozenset,
+        alias="TELEGRAM_NOTIFICATION_CHAT_IDS",
     )
     integration_clients: tuple[IntegrationClient, ...] = Field(
         default_factory=tuple,
@@ -98,6 +106,23 @@ class Settings(BaseSettings):
     webhook_path: str = Field(default="/telegram/webhook", alias="WEBHOOK_PATH")
     webhook_secret_token: str = Field(default="", alias="WEBHOOK_SECRET_TOKEN")
     webhook_max_connections: int = Field(default=40, ge=1, le=100, alias="WEBHOOK_MAX_CONNECTIONS")
+    health_server_enabled: bool = Field(default=False, alias="HEALTH_SERVER_ENABLED")
+    health_listen: str = Field(default="127.0.0.1", alias="HEALTH_LISTEN")
+    health_port: int = Field(default=8081, ge=1, le=65535, alias="HEALTH_PORT")
+    sanity_check_enabled: bool = Field(default=True, alias="SANITY_CHECK_ENABLED")
+    sanity_check_interval_minutes: int = Field(
+        default=360,
+        ge=5,
+        alias="SANITY_CHECK_INTERVAL_MINUTES",
+    )
+    source_activity_check_enabled: bool = Field(
+        default=False,
+        alias="SOURCE_ACTIVITY_CHECK_ENABLED",
+    )
+    source_activity_window_hours: int = Field(default=24, ge=1, alias="SOURCE_ACTIVITY_WINDOW_HOURS")
+    error_reporting_dsn: str = Field(default="", alias="ERROR_REPORTING_DSN")
+    error_reporting_environment: str = Field(default="production", alias="ERROR_REPORTING_ENVIRONMENT")
+    database_backend: str = Field(default="sqlite", alias="DATABASE_BACKEND")
     backup_daily_enabled: bool = Field(default=True, alias="BACKUP_DAILY_ENABLED")
     backup_time: str = Field(default="03:00", alias="BACKUP_TIME")
     backup_retention_count: int = Field(default=14, ge=1, alias="BACKUP_RETENTION_COUNT")
@@ -128,7 +153,13 @@ class Settings(BaseSettings):
             for item in payload
         )
 
-    @field_validator("admin_user_ids", "request_topic_ids", "requester_bot_ids", mode="before")
+    @field_validator(
+        "admin_user_ids",
+        "request_topic_ids",
+        "requester_bot_ids",
+        "telegram_notification_chat_ids",
+        mode="before",
+    )
     @classmethod
     def parse_integer_sets(cls, value: object) -> object:
         if value in (None, ""):
@@ -209,8 +240,16 @@ class Settings(BaseSettings):
     @classmethod
     def validate_log_format(cls, value: str) -> str:
         normalized = value.strip().casefold()
-        if normalized not in {"json", "text"}:
-            raise ValueError("must be json or text")
+        if normalized not in {"console", "json", "text"}:
+            raise ValueError("must be console, json, or text")
+        return normalized
+
+    @field_validator("database_backend")
+    @classmethod
+    def validate_database_backend(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized != "sqlite":
+            raise ValueError("only sqlite is currently supported")
         return normalized
 
     @model_validator(mode="after")

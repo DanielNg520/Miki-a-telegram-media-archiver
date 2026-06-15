@@ -1179,6 +1179,24 @@ class SqliteRepositories:
             )
         }
 
+    def count_recent_source_posts(
+        self,
+        source_chat_id: int,
+        source_thread_id: int,
+        since: str,
+    ) -> int:
+        return self._connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM posts
+            WHERE source_chat_id = ?
+              AND source_thread_id = ?
+              AND is_available = 1
+              AND datetime(COALESCE(message_created_at, created_at)) >= datetime(?)
+            """,
+            (source_chat_id, source_thread_id, since),
+        ).fetchone()[0]
+
     def operational_status(self) -> dict[str, Any]:
         job_counts = {
             row["status"]: row["count"]

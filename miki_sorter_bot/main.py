@@ -7,6 +7,9 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from miki_sorter_bot.config import get_settings
+from miki_sorter_bot.diagnostics import DiagnosticReport, run_diagnostics
+from miki_sorter_bot.error_reporting import configure_error_reporter
+from miki_sorter_bot.health_server import HealthServer
 from miki_sorter_bot.logging_config import (
     configure_logging,
     reset_correlation_id,
@@ -64,6 +67,10 @@ def main() -> None:
         raise SystemExit(f"Invalid bot configuration: {messages}") from error
 
     configure_logging(settings.log_level, settings.log_format)
+    error_reporter = configure_error_reporter(
+        dsn=settings.error_reporting_dsn,
+        environment=settings.error_reporting_environment,
+    )
     storage = Storage(settings.database_path)
     repositories = storage.open()
     recovered_by_kind = repositories.recover_interrupted_jobs_by_kind()
@@ -100,13 +107,30 @@ def main() -> None:
         sorting,
         operations,
     )
+    health_server = (
+        HealthServer(
+            host=settings.health_listen,
+            port=settings.health_port,
+            status_provider=repositories.operational_status,
+        )
+        if settings.health_server_enabled
+        else None
+    )
 
     async def close_storage(_: Application) -> None:
+        if health_server is not None:
+            health_server.stop()
         storage.close()
+
+    async def startup_tasks(application: Application) -> None:
+        if health_server is not None:
+            health_server.start()
+        await _send_startup_checkin(application, settings, repositories)
 
     application = (
         Application.builder()
         .token(settings.bot_token)
+        .post_init(startup_tasks)
         .post_shutdown(close_storage)
         .build()
     )
@@ -115,8 +139,12 @@ def main() -> None:
     application.bot_data["retrieval"] = retrieval
     application.bot_data["integrations"] = integrations
     application.bot_data["operations"] = operations
+    application.bot_data["repositories"] = repositories
     application.bot_data["settings"] = settings
+    application.bot_data["error_reporter"] = error_reporter
+    application.add_error_handler(_handle_error)
     _schedule_daily_backup(application, settings, operations, repositories)
+    _schedule_sanity_checks(application, settings, repositories)
     _add_management_handlers(application, management)
     application.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, sort_message))
     application.add_handler(
@@ -136,6 +164,22 @@ def main() -> None:
     )
 
     _run_application(application, settings)
+
+
+async def _handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+    if error is None:
+        return
+    reporter = context.application.bot_data.get("error_reporter")
+    if reporter is not None:
+        reporter.capture_exception(error)
+    repositories = context.application.bot_data.get("repositories")
+    if repositories is not None:
+        repositories.increment_metric("application_errors", 1)
+    LOGGER.error(
+        "Unhandled application error",
+        exc_info=(type(error), error, error.__traceback__),
+    )
 
 
 def _run_application(application: Application, settings) -> None:
@@ -167,6 +211,65 @@ def _run_application(application: Application, settings) -> None:
         allowed_updates=Update.ALL_TYPES,
         bootstrap_retries=settings.telegram_bootstrap_retries,
         drop_pending_updates=settings.telegram_drop_pending_updates,
+    )
+
+
+async def _send_startup_checkin(
+    application: Application,
+    settings,
+    repositories,
+) -> None:
+    if not settings.telegram_startup_checkin_enabled:
+        return
+    report = run_diagnostics(settings, repositories)
+    await _notify_operators(application, settings, "Miki started.\n\n" + report.format())
+
+
+async def _notify_operators(application: Application, settings, text: str) -> None:
+    targets = settings.telegram_notification_chat_ids or settings.admin_user_ids
+    for chat_id in targets:
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=text)
+        except Exception:
+            LOGGER.warning("Could not notify operator", extra={"chat_id": chat_id})
+
+
+def _non_ok_summary(report: DiagnosticReport) -> str:
+    checks = [check for check in report.checks if check.level != "ok"]
+    if not checks:
+        return ""
+    return "\n".join(f"- [{check.level.upper()}] {check.name}: {check.message}" for check in checks)
+
+
+def _schedule_sanity_checks(application: Application, settings, repositories) -> None:
+    if not settings.sanity_check_enabled:
+        return
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Sanity checks requested but JobQueue is unavailable.")
+        return
+
+    async def run_sanity_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+        token = set_correlation_id("sanity-check")
+        try:
+            report = run_diagnostics(settings, repositories)
+            summary = _non_ok_summary(report)
+            if not summary:
+                repositories.increment_metric("sanity_checks_ok", 1)
+                return
+            repositories.increment_metric("sanity_check_warnings", 1)
+            LOGGER.warning("Sanity check found issues", extra={"count": len(summary.splitlines())})
+            if settings.telegram_notification_chat_ids:
+                await _notify_operators(context.application, settings, "Miki checkup:\n" + summary)
+        finally:
+            reset_correlation_id(token)
+
+    interval_seconds = settings.sanity_check_interval_minutes * 60
+    job_queue.run_repeating(
+        run_sanity_check,
+        interval=interval_seconds,
+        first=interval_seconds,
+        name="sanity-check",
     )
 
 

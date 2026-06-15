@@ -27,10 +27,28 @@ Optional hardening:
 ```env
 WEBHOOK_SECRET_TOKEN=long-random-secret
 WEBHOOK_MAX_CONNECTIONS=40
+TELEGRAM_STARTUP_CHECKIN_ENABLED=true
+TELEGRAM_NOTIFICATION_CHAT_IDS=123456789
+SANITY_CHECK_ENABLED=true
+SOURCE_ACTIVITY_CHECK_ENABLED=true
+ERROR_REPORTING_DSN=
+```
+
+To send exceptions to Sentry-compatible reporting, install with:
+
+```bash
+pip install ".[monitoring]"
 ```
 
 Do not set both polling and webhook services for the same bot token. Telegram can deliver updates to
 only one active consumer.
+
+SQLite needs persistent storage. On hosts with ephemeral filesystems, mount a persistent disk and set:
+
+```env
+DATABASE_PATH=/data/miki.sqlite3
+BACKUP_DIRECTORY=/data/backups
+```
 
 ## Render
 
@@ -47,6 +65,31 @@ Use the included `Dockerfile`. Create a Web Service, expose the HTTP port Koyeb 
 
 Koyeb performs TCP health checks on exposed ports by default, so the webhook process becoming
 reachable is enough for basic platform health.
+
+## Health and Metrics
+
+For VPS or polling deployments, enable the lightweight local HTTP helper:
+
+```env
+HEALTH_SERVER_ENABLED=true
+HEALTH_LISTEN=0.0.0.0
+HEALTH_PORT=8081
+```
+
+It serves:
+
+- `/healthz` for a JSON health result.
+- `/metrics` for Prometheus-style counters.
+
+For webhook services, keep the helper on a different exposed port or leave it disabled; the webhook
+server already owns the platform `PORT`.
+
+## Future Database Scaling
+
+Miki currently supports `DATABASE_BACKEND=sqlite`. Keep one running instance per bot token. If the
+library grows large enough to need multi-instance hosting or remote managed storage, add a Postgres
+repository implementation behind the existing repository interface before enabling
+`DATABASE_BACKEND=postgres`.
 
 ## Self-check
 

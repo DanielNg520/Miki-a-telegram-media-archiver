@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Iterable
 
 from pydantic import ValidationError
@@ -47,6 +48,7 @@ def run_diagnostics(settings: Settings, repositories: SqliteRepositories) -> Dia
         _runtime_check(settings),
         *_archive_checks(settings, repositories),
         *_retrieval_checks(settings),
+        *_source_activity_checks(settings, repositories),
         *_operational_checks(repositories),
     ]
     return DiagnosticReport(tuple(checks))
@@ -120,6 +122,35 @@ def _retrieval_checks(settings: Settings) -> Iterable[DiagnosticCheck]:
             "retrieval",
             "REQUEST_TOPIC_IDS is empty, so #request retrieval submissions are disabled.",
         )
+
+
+def _source_activity_checks(
+    settings: Settings,
+    repositories: SqliteRepositories,
+) -> Iterable[DiagnosticCheck]:
+    if not getattr(settings, "source_activity_check_enabled", False):
+        return
+    hours = getattr(settings, "source_activity_window_hours", 24)
+    since = datetime.now(UTC) - timedelta(hours=hours)
+    recent = repositories.count_recent_source_posts(
+        settings.source_chat_id,
+        settings.source_thread_id,
+        since.isoformat(),
+    )
+    if recent:
+        yield DiagnosticCheck(
+            "ok",
+            "source_activity",
+            f"{recent} indexed post(s) from the source topic in the last {hours}h.",
+        )
+        return
+    yield DiagnosticCheck(
+        "warning",
+        "source_activity",
+        f"No indexed posts from the source topic in the last {hours}h. "
+        "If posts were expected, verify Miki is running, privacy mode is off, "
+        "and SOURCE_THREAD_ID is correct.",
+    )
 
 
 def _human_level(level: str) -> str:

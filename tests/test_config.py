@@ -32,6 +32,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.telegram_retry_attempts, 3)
         self.assertEqual(settings.telegram_bootstrap_retries, -1)
         self.assertFalse(settings.telegram_drop_pending_updates)
+        self.assertFalse(settings.telegram_startup_checkin_enabled)
+        self.assertFalse(settings.health_server_enabled)
+        self.assertTrue(settings.sanity_check_enabled)
+        self.assertFalse(settings.source_activity_check_enabled)
+        self.assertEqual(settings.database_backend, "sqlite")
 
     def test_rejects_blank_bot_token(self) -> None:
         values = _values()
@@ -163,15 +168,34 @@ class SettingsTests(unittest.TestCase):
         values = _values()
         values["TELEGRAM_BOOTSTRAP_RETRIES"] = "5"
         values["TELEGRAM_DROP_PENDING_UPDATES"] = "true"
+        values["TELEGRAM_STARTUP_CHECKIN_ENABLED"] = "true"
+        values["TELEGRAM_NOTIFICATION_CHAT_IDS"] = "1,2"
         values["WEBHOOK_SECRET_TOKEN"] = "secret-token"
         values["WEBHOOK_MAX_CONNECTIONS"] = "20"
+        values["HEALTH_SERVER_ENABLED"] = "true"
+        values["HEALTH_PORT"] = "9090"
+        values["SOURCE_ACTIVITY_CHECK_ENABLED"] = "true"
+        values["ERROR_REPORTING_DSN"] = "https://public@example.invalid/1"
 
         settings = Settings(**values)
 
         self.assertEqual(settings.telegram_bootstrap_retries, 5)
         self.assertTrue(settings.telegram_drop_pending_updates)
+        self.assertTrue(settings.telegram_startup_checkin_enabled)
+        self.assertEqual(settings.telegram_notification_chat_ids, frozenset({1, 2}))
         self.assertEqual(settings.webhook_secret_token, "secret-token")
         self.assertEqual(settings.webhook_max_connections, 20)
+        self.assertTrue(settings.health_server_enabled)
+        self.assertEqual(settings.health_port, 9090)
+        self.assertTrue(settings.source_activity_check_enabled)
+        self.assertEqual(settings.error_reporting_dsn, "https://public@example.invalid/1")
+
+    def test_rejects_future_database_backend_until_supported(self) -> None:
+        values = _values()
+        values["DATABASE_BACKEND"] = "postgres"
+
+        with self.assertRaisesRegex(ValidationError, "only sqlite"):
+            Settings(**values)
 
     def test_rejects_invalid_runtime_mode(self) -> None:
         values = _values()

@@ -17,6 +17,8 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "webhook_listen": "0.0.0.0",
         "webhook_port": 8080,
         "request_topic_ids": frozenset(),
+        "source_activity_check_enabled": False,
+        "source_activity_window_hours": 24,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -59,3 +61,20 @@ def test_diagnostics_warns_on_webhook_path_mismatch(database_connection) -> None
 
     assert not report.has_errors
     assert "[CHECK] runtime" in report.format()
+
+
+def test_diagnostics_warns_when_source_activity_is_quiet(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "hashtag", "JAV", 1)
+
+    report = run_diagnostics(
+        _settings(
+            request_topic_ids=frozenset({50}),
+            source_activity_check_enabled=True,
+        ),
+        repositories,
+    )
+
+    assert not report.has_errors
+    assert "[CHECK] source_activity" in report.format()
