@@ -143,3 +143,29 @@ def test_admin_can_view_audit_log(database_connection) -> None:
     asyncio.run(commands.audit_log(update, SimpleNamespace()))
 
     assert "test.event" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_admin_can_run_human_readable_doctor(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "hashtag", "JAV", 10)
+    settings = SimpleNamespace(
+        admin_user_ids=frozenset({10}),
+        source_chat_id=-100,
+        source_thread_id=5,
+        archive_chat_id=-200,
+        run_mode="polling",
+        webhook_url="",
+        webhook_path="/telegram/webhook",
+        webhook_listen="0.0.0.0",
+        webhook_port=8080,
+        request_topic_ids=frozenset({50}),
+    )
+    commands = ManagementCommands(settings, repositories)
+    update = _update("/doctor")
+
+    asyncio.run(commands.doctor(update, SimpleNamespace()))
+
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "Miki checkup" in reply
+    assert "Result: Miki is ready" in reply

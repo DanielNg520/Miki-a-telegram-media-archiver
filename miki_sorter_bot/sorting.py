@@ -15,7 +15,7 @@ from miki_sorter_bot.repositories import RouteMappingRecord, SqliteRepositories,
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
 
 LOGGER = logging.getLogger(__name__)
-HASHTAG_RE = re.compile(r"(?<!\w)#([^\W_]+(?:-[^\W_]+)*)", re.UNICODE)
+HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,7 +284,10 @@ def _matching_non_hashtags(
         for mapping in mappings
         if mapping.topic_id in topics
         and (
-            (mapping.kind == "keyword" and mapping.normalized_value in tokens)
+            (
+                mapping.kind == "keyword"
+                and any(mapping.normalized_value in token for token in tokens)
+            )
             or (
                 mapping.kind == "phrase"
                 and f" {mapping.normalized_value} " in padded

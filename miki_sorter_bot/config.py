@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from miki_sorter_bot.routing import Route
@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     telegram_retry_attempts: int = Field(default=3, ge=1, le=10, alias="TELEGRAM_RETRY_ATTEMPTS")
     telegram_retry_base_delay: float = Field(default=0.5, ge=0, alias="TELEGRAM_RETRY_BASE_DELAY")
     telegram_retry_max_delay: float = Field(default=8.0, ge=0, alias="TELEGRAM_RETRY_MAX_DELAY")
+    telegram_bootstrap_retries: int = Field(default=-1, alias="TELEGRAM_BOOTSTRAP_RETRIES")
+    telegram_drop_pending_updates: bool = Field(
+        default=False,
+        alias="TELEGRAM_DROP_PENDING_UPDATES",
+    )
     telegram_messages_per_second: float = Field(
         default=10.0,
         gt=0,
@@ -81,6 +86,18 @@ class Settings(BaseSettings):
         alias="INTEGRATION_SIGNATURE_TTL",
     )
     send_confirmation: bool = Field(default=False, alias="SEND_CONFIRMATION")
+    run_mode: str = Field(default="polling", alias="RUN_MODE")
+    webhook_url: str = Field(default="", alias="WEBHOOK_URL")
+    webhook_listen: str = Field(default="0.0.0.0", alias="WEBHOOK_LISTEN")
+    webhook_port: int = Field(
+        default=8080,
+        ge=1,
+        le=65535,
+        validation_alias=AliasChoices("WEBHOOK_PORT", "PORT"),
+    )
+    webhook_path: str = Field(default="/telegram/webhook", alias="WEBHOOK_PATH")
+    webhook_secret_token: str = Field(default="", alias="WEBHOOK_SECRET_TOKEN")
+    webhook_max_connections: int = Field(default=40, ge=1, le=100, alias="WEBHOOK_MAX_CONNECTIONS")
     backup_daily_enabled: bool = Field(default=True, alias="BACKUP_DAILY_ENABLED")
     backup_time: str = Field(default="03:00", alias="BACKUP_TIME")
     backup_retention_count: int = Field(default=14, ge=1, alias="BACKUP_RETENTION_COUNT")
@@ -172,6 +189,22 @@ class Settings(BaseSettings):
             raise ValueError("must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
         return normalized
 
+    @field_validator("run_mode")
+    @classmethod
+    def validate_run_mode(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"polling", "webhook"}:
+            raise ValueError("must be polling or webhook")
+        return normalized
+
+    @field_validator("webhook_path")
+    @classmethod
+    def validate_webhook_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError("WEBHOOK_PATH must start with /")
+        return normalized
+
     @field_validator("log_format")
     @classmethod
     def validate_log_format(cls, value: str) -> str:
@@ -194,6 +227,8 @@ class Settings(BaseSettings):
             raise ValueError("DEFAULT_REQUEST_LIMIT must not exceed MAX_REQUEST_LIMIT")
         if self.telegram_retry_base_delay > self.telegram_retry_max_delay:
             raise ValueError("TELEGRAM_RETRY_BASE_DELAY must not exceed TELEGRAM_RETRY_MAX_DELAY")
+        if self.run_mode == "webhook" and not self.webhook_url.strip():
+            raise ValueError("WEBHOOK_URL is required when RUN_MODE=webhook")
         client_ids = [client.client_id for client in self.integration_clients]
         if len(client_ids) != len(set(client_ids)):
             raise ValueError("integration client IDs must be unique")

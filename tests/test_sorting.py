@@ -57,7 +57,7 @@ def _routes(repositories: SqliteRepositories) -> None:
     repositories.add_mapping(-200, 9, "phrase", "New York", 1)
 
 
-def test_matcher_enforces_hashtag_precedence_and_exact_tokens(database_connection) -> None:
+def test_matcher_enforces_hashtag_precedence_and_keyword_substrings(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _routes(repositories)
     matcher = RouteMatcher(repositories, -200)
@@ -69,7 +69,8 @@ def test_matcher_enforces_hashtag_precedence_and_exact_tokens(database_connectio
     assert hashtag.status == "matched"
     assert hashtag.topic.thread_id == 9
     assert hashtag.reason == "hashtag:japan"
-    assert substring.status == "unmatched"
+    assert substring.status == "matched"
+    assert substring.topic.thread_id == 10
     assert phrase.topic.thread_id == 9
 
 
@@ -105,6 +106,56 @@ def test_successful_sort_persists_before_copy_and_indexes_result(database_connec
     assert delivery.destination_message_id == 99
     bot.copy_message.assert_awaited_once()
     indexing.index_copy.assert_called_once()
+
+
+def test_keyword_inside_compact_identifier_is_sorted(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    repositories.add_mapping(-200, 10, "keyword", "COD", 1)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    message = _message("New COD123 release")
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    )
+    update = SimpleNamespace(
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    bot.copy_message.assert_awaited_once()
+    assert bot.copy_message.await_args.kwargs["message_thread_id"] == 10
+
+
+def test_hashtag_with_underscore_is_sorted(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    repositories.add_mapping(-200, 9, "hashtag", "New_York", 1)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    message = _message("A photo from #New_York")
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    )
+    update = SimpleNamespace(
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    bot.copy_message.assert_awaited_once()
+    assert bot.copy_message.await_args.kwargs["message_thread_id"] == 9
 
 
 def test_duplicate_update_does_not_copy_twice(database_connection) -> None:

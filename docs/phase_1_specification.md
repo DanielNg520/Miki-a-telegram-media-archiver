@@ -21,7 +21,7 @@ Current entry points:
 Current modules:
 
 - `main.py` filters incoming messages and copies matched media.
-- `routing.py` extracts exact tokens and selects a configured route.
+- `routing.py` extracts tokens and selects a configured route.
 - `collector.py` checks candidate terms through the external Data Collector API.
 - `config.py` loads and validates environment configuration.
 - `show_ids.py` provides the topic-ID helper.
@@ -83,9 +83,9 @@ Routes may be triggered by:
 Matching is Unicode-aware and case-insensitive.
 
 - Hashtags match the complete hashtag.
-- Single keywords match complete tokens, not substrings.
+- Single keywords match anywhere within an individual token.
 - Phrases match complete consecutive tokens separated by ordinary whitespace or punctuation.
-- `abc` matches `ABC`, but does not match `abcdef`.
+- `abc` matches both `ABC` and `ABC123`, but does not span separate tokens.
 - A message without text or a caption is not routed automatically.
 
 ### Routing Precedence
@@ -178,7 +178,7 @@ Normalization:
 - Search using Unicode `casefold`.
 - Remove surrounding punctuation.
 - Deduplicate normalized values.
-- Match complete tokens by default.
+- Match configured keywords within individual tokens.
 - Keep phrase token order.
 - Record an `extractor_version` with every indexed post.
 
@@ -192,7 +192,7 @@ so a lowercase routing keyword such as `abc` remains searchable.
 
 1. Media captioned `Trip to Tokyo #Japan` routes to the registered `#Japan` topic.
 2. Media captioned `new ABC release` routes to the topic mapped to keyword `abc`.
-3. Keyword `abc` does not match `abcdef`.
+3. Keyword `abc` matches identifiers such as `abcdef` and `ABC123`.
 4. Phrase `New York` matches `NEW YORK`, but not `new project in York`.
 5. A hashtag and keyword targeting the same topic create one copy.
 6. Matches targeting two different topics create no copy and record a conflict.

@@ -8,6 +8,7 @@ from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import ContextTypes
 
 from miki_sorter_bot.config import Settings
+from miki_sorter_bot.diagnostics import run_diagnostics
 from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.repositories import SqliteRepositories, normalize_mapping
@@ -322,6 +323,13 @@ class ManagementCommands:
             f"- Telegram throttles: {metrics.get('telegram_throttles', 0)}\n"
             f"- average delivery time: {average_ms} ms"
         )
+
+    async def doctor(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, _ = command
+        await message.reply_text(run_diagnostics(self._settings, self._repositories).format())
 
     async def maintenance(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._admin_context(update)

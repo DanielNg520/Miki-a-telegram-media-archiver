@@ -71,6 +71,12 @@ Example route:
 
 ## Run
 
+Miki supports two runtime modes:
+
+- `RUN_MODE=polling` for an always-on machine or VPS. This is the default and simplest mode.
+- `RUN_MODE=webhook` for HTTPS web app hosts such as Koyeb or Render. Telegram pushes each update
+  to Miki's public URL instead of Miki continuously polling Telegram.
+
 ```bash
 miki-sorter
 ```
@@ -80,6 +86,20 @@ Or:
 ```bash
 python -m miki_sorter_bot.main
 ```
+
+For webhook mode, set:
+
+```env
+RUN_MODE=webhook
+WEBHOOK_URL=https://your-app.example.com/telegram/webhook
+WEBHOOK_LISTEN=0.0.0.0
+WEBHOOK_PORT=8080
+WEBHOOK_PATH=/telegram/webhook
+```
+
+`WEBHOOK_URL` must be the public HTTPS URL that reaches this process. `WEBHOOK_PORT` should match
+the port expected by your host. Only one Miki instance should run for a bot token, regardless of
+whether it uses polling or webhook mode.
 
 While Miki is running, an administrator can identify the current chat and forum topic by
 sending either command inside that topic:
@@ -100,6 +120,18 @@ miki-show-ids
 
 Then send `/show_ids` or `/where` inside the target topic. Do not run this listener at the same
 time as `miki-sorter` with the same bot token because Telegram permits only one polling process.
+
+To run local deployment checks without inspecting SQLite manually:
+
+```bash
+miki-doctor
+```
+
+It verifies configuration, database migrations, archive topic registration, route mappings, runtime
+mode, and outstanding operational warnings. It exits non-zero when required archive setup is missing.
+The same check is available to Telegram admins with `/doctor`.
+
+For Render/Koyeb webhook hosting, see `docs/hosted_webhook_deployment.md`.
 
 ## Command Reference (User Guide)
 

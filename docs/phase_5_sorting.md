@@ -21,7 +21,7 @@ messages are rejected at the input boundary to prevent loops.
 
 Matching is Unicode-aware and case-insensitive:
 
-- Hashtags and keywords require exact tokens.
+- Hashtags require exact tokens; keywords may match within an individual token.
 - Phrases require exact consecutive normalized tokens.
 - Hashtags have priority over keywords and phrases.
 - Several rules targeting one topic collapse into one route.

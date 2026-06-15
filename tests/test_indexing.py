@@ -64,6 +64,22 @@ def test_extractor_retains_compact_identifiers_and_configured_values() -> None:
     assert result.version == EXTRACTOR_VERSION
 
 
+def test_configured_keyword_matches_inside_compact_identifier() -> None:
+    result = extract_search_tokens("New COD123 release", {("keyword", "cod")})
+
+    assert ("keyword", "cod") in {
+        (token.kind, token.normalized_value) for token in result.tokens
+    }
+
+
+def test_hashtag_with_underscore_is_extracted() -> None:
+    result = extract_search_tokens("Visiting #New_York")
+
+    assert ("hashtag", "new_york") in {
+        (token.kind, token.normalized_value) for token in result.tokens
+    }
+
+
 def test_index_upsert_replaces_stale_tokens_on_caption_edit(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     indexer = MessageIndexer(repositories, bot_id=99)

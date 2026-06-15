@@ -43,7 +43,11 @@ def extract_terms(text: str) -> set[str]:
 def route_candidates(text: str, routes: list[Route]) -> set[str]:
     message_terms = extract_terms(text)
     configured_terms = {keyword for route in routes for keyword in route.keywords}
-    return message_terms & configured_terms
+    return {
+        keyword
+        for keyword in configured_terms
+        if any(keyword in message_term for message_term in message_terms)
+    }
 
 
 def choose_route(matches: set[str], routes: list[Route]) -> RouteDecision | None:

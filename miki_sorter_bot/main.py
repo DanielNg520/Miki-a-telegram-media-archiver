@@ -135,8 +135,39 @@ def main() -> None:
         group=2,
     )
 
-    LOGGER.info("Miki sorter is running.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    _run_application(application, settings)
+
+
+def _run_application(application: Application, settings) -> None:
+    if settings.run_mode == "webhook":
+        LOGGER.info(
+            "Miki sorter is running in webhook mode.",
+            extra={
+                "webhook_url": settings.webhook_url,
+                "listen": settings.webhook_listen,
+                "port": settings.webhook_port,
+                "path": settings.webhook_path,
+            },
+        )
+        application.run_webhook(
+            listen=settings.webhook_listen,
+            port=settings.webhook_port,
+            url_path=settings.webhook_path.lstrip("/"),
+            webhook_url=settings.webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+            bootstrap_retries=settings.telegram_bootstrap_retries,
+            drop_pending_updates=settings.telegram_drop_pending_updates,
+            max_connections=settings.webhook_max_connections,
+            secret_token=settings.webhook_secret_token or None,
+        )
+        return
+
+    LOGGER.info("Miki sorter is running in polling mode.")
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        bootstrap_retries=settings.telegram_bootstrap_retries,
+        drop_pending_updates=settings.telegram_drop_pending_updates,
+    )
 
 
 def _schedule_daily_backup(
@@ -218,6 +249,7 @@ def _add_management_handlers(
         "hashtag_remove": management.hashtag_remove,
         "hashtag_replace": management.hashtag_replace,
         "hashtag_list": management.hashtag_list,
+        "doctor": management.doctor,
         "manager_add": management.manager_add,
         "manager_remove": management.manager_remove,
         "reindex": management.reindex,

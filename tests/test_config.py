@@ -30,6 +30,8 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.sort_dry_run)
         self.assertEqual(settings.requester_bot_ids, frozenset())
         self.assertEqual(settings.telegram_retry_attempts, 3)
+        self.assertEqual(settings.telegram_bootstrap_retries, -1)
+        self.assertFalse(settings.telegram_drop_pending_updates)
 
     def test_rejects_blank_bot_token(self) -> None:
         values = _values()
@@ -134,6 +136,48 @@ class SettingsTests(unittest.TestCase):
         values["BACKUP_TIME"] = "25:00"
 
         with self.assertRaisesRegex(ValidationError, "BACKUP_TIME"):
+            Settings(**values)
+
+    def test_webhook_mode_requires_public_url(self) -> None:
+        values = _values()
+        values["RUN_MODE"] = "webhook"
+
+        with self.assertRaisesRegex(ValidationError, "WEBHOOK_URL"):
+            Settings(**values)
+
+        values["WEBHOOK_URL"] = "https://miki.example.com/telegram/webhook"
+        settings = Settings(**values)
+
+        self.assertEqual(settings.run_mode, "webhook")
+        self.assertEqual(settings.webhook_path, "/telegram/webhook")
+
+    def test_webhook_port_can_use_host_port_env(self) -> None:
+        values = _values()
+        values["PORT"] = "9000"
+
+        settings = Settings(**values)
+
+        self.assertEqual(settings.webhook_port, 9000)
+
+    def test_webhook_security_and_bootstrap_settings_are_configurable(self) -> None:
+        values = _values()
+        values["TELEGRAM_BOOTSTRAP_RETRIES"] = "5"
+        values["TELEGRAM_DROP_PENDING_UPDATES"] = "true"
+        values["WEBHOOK_SECRET_TOKEN"] = "secret-token"
+        values["WEBHOOK_MAX_CONNECTIONS"] = "20"
+
+        settings = Settings(**values)
+
+        self.assertEqual(settings.telegram_bootstrap_retries, 5)
+        self.assertTrue(settings.telegram_drop_pending_updates)
+        self.assertEqual(settings.webhook_secret_token, "secret-token")
+        self.assertEqual(settings.webhook_max_connections, 20)
+
+    def test_rejects_invalid_runtime_mode(self) -> None:
+        values = _values()
+        values["RUN_MODE"] = "cron"
+
+        with self.assertRaisesRegex(ValidationError, "polling or webhook"):
             Settings(**values)
 
 
