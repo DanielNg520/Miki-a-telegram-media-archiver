@@ -168,6 +168,21 @@ def test_route_manager_grants_are_scoped_to_chat(database_connection) -> None:
     assert repositories.revoke_route_manager(-100, 20)
 
 
+def test_is_manager_is_chat_independent_and_revoke_is_universal(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+
+    repositories.grant_route_manager(-100, 20, 10)
+    # Recognized regardless of which chat a command arrives in.
+    assert repositories.is_manager(20)
+    assert not repositories.is_manager(21)
+
+    # A second grant in another chat is independent but still one universal manager.
+    repositories.grant_route_manager(-200, 20, 10)
+    assert repositories.revoke_manager(20)
+    assert not repositories.is_manager(20)
+    assert not repositories.revoke_manager(20)
+
+
 def test_mapping_normalization_distinguishes_tokens_and_phrases() -> None:
     assert normalize_mapping("hashtag", "#Japan") == ("Japan", "japan")
     assert normalize_mapping("keyword", " ABC ") == ("ABC", "abc")

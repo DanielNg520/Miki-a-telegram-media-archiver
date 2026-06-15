@@ -144,7 +144,8 @@ class ManagementCommands:
             return
         created = self._repositories.grant_route_manager(chat.id, target, user.id)
         await message.reply_text(
-            f"Route manager {target} {'added' if created else 'was already authorized'}."
+            f"Manager {target} {'added' if created else 'was already authorized'} "
+            "(full access, all chats, effective immediately)."
         )
         self._audit(user.id, "manager.add", "telegram_user", str(target))
 
@@ -157,9 +158,9 @@ class ManagementCommands:
         if target is None:
             await message.reply_text("Usage: /manager_remove <Telegram user ID>")
             return
-        removed = self._repositories.revoke_route_manager(chat.id, target)
+        removed = self._repositories.revoke_manager(target)
         await message.reply_text(
-            f"Route manager {target} {'removed' if removed else 'was not authorized'}."
+            f"Manager {target} {'removed' if removed else 'was not authorized'}."
         )
         self._audit(
             user.id,
@@ -505,10 +506,7 @@ class ManagementCommands:
         user = update.effective_user
         if message is None or chat is None or user is None:
             return None
-        if user.id not in self._settings.admin_user_ids and not self._repositories.is_route_manager(
-            chat.id,
-            user.id,
-        ):
+        if not self._is_admin(user.id):
             await message.reply_text("You are not authorized to manage Miki's routes.")
             return None
         return message, chat, user
@@ -519,10 +517,19 @@ class ManagementCommands:
         user = update.effective_user
         if message is None or chat is None or user is None:
             return None
-        if user.id not in self._settings.admin_user_ids:
+        if not self._is_admin(user.id):
             await message.reply_text("Only a configured Miki administrator can do that.")
             return None
         return message, chat, user
+
+    def _is_admin(self, user_id: int) -> bool:
+        """Configured admins and users granted via /manager_add are equivalent.
+
+        Managers are checked across all chats so the grant is universal, and they
+        share full admin powers — both effective immediately, without a restart.
+        """
+
+        return user_id in self._settings.admin_user_ids or self._repositories.is_manager(user_id)
 
     def _audit(
         self,

@@ -139,6 +139,8 @@ class RouteMappingRepository(Protocol):
 class AuthorizationRepository(Protocol):
     def is_route_manager(self, chat_id: int, user_id: int) -> bool: ...
 
+    def is_manager(self, user_id: int) -> bool: ...
+
     def grant_route_manager(
         self,
         chat_id: int,
@@ -147,6 +149,8 @@ class AuthorizationRepository(Protocol):
     ) -> bool: ...
 
     def revoke_route_manager(self, chat_id: int, user_id: int) -> bool: ...
+
+    def revoke_manager(self, user_id: int) -> bool: ...
 
 
 class ProcessedUpdateRepository(Protocol):
@@ -454,6 +458,17 @@ class SqliteRepositories:
             is not None
         )
 
+    def is_manager(self, user_id: int) -> bool:
+        """True if the user is a manager in any chat (chat-independent)."""
+
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM route_managers WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            is not None
+        )
+
     def grant_route_manager(
         self,
         chat_id: int,
@@ -478,6 +493,16 @@ class SqliteRepositories:
                 (chat_id, user_id),
             )
         return cursor.rowcount == 1
+
+    def revoke_manager(self, user_id: int) -> bool:
+        """Remove a manager from every chat (chat-independent). True if any removed."""
+
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM route_managers WHERE user_id = ?",
+                (user_id,),
+            )
+        return cursor.rowcount > 0
 
     def upsert_post(
         self,

@@ -121,8 +121,13 @@ Route commands:
 /keyword_find <keyword or quoted phrase>
 ```
 
-Configured administrators can delegate route management with `/manager_add <user_id>` and revoke
-it with `/manager_remove <user_id>`.
+An admin or existing manager can grant full management access with
+`/manager_add <user_id>` and revoke it with `/manager_remove <user_id>`. Managers
+added this way are **universal** — they have the same powers as users in
+`ADMIN_USER_IDS`, work in every chat, can themselves delegate, and the grant takes
+effect **immediately with no restart** (it is stored in the database and checked
+live). By contrast, editing `ADMIN_USER_IDS` in `.env` is only read at startup and
+**does** require a restart, so `/manager_add` is the preferred way to add people.
 
 ## Search Index
 

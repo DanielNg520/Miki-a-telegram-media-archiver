@@ -91,15 +91,28 @@ def test_delegated_manager_can_add_phrase_mapping(database_connection) -> None:
     ]
 
 
-def test_admin_delegation_is_not_available_to_route_manager(database_connection) -> None:
+def test_manager_grant_is_universal_and_can_delegate(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
+    # Granted in one chat...
     repositories.grant_route_manager(-100, 20, 10)
     commands = ManagementCommands(_settings(10), repositories)
-    update = _update("/manager_add 30", user_id=20)
+
+    # ...the manager has full admin powers in a *different* chat, no restart.
+    update = _update("/manager_add 30", user_id=20, chat_id=-999)
+    asyncio.run(commands.manager_add(update, SimpleNamespace()))
+
+    assert repositories.is_manager(30)
+    assert repositories.is_manager(20)
+
+
+def test_non_manager_cannot_delegate(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/manager_add 30", user_id=99)
 
     asyncio.run(commands.manager_add(update, SimpleNamespace()))
 
-    assert not repositories.is_route_manager(-100, 30)
+    assert not repositories.is_manager(30)
 
 
 def test_topic_status_updates_change_registered_topic_state(database_connection) -> None:
