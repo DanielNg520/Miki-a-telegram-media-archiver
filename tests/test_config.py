@@ -28,6 +28,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.default_request_limit, 20)
         self.assertEqual(settings.max_request_limit, 100)
         self.assertFalse(settings.sort_dry_run)
+        self.assertEqual(settings.album_flush_delay_seconds, 5.0)
+        self.assertEqual(settings.album_max_wait_seconds, 30.0)
         self.assertEqual(settings.requester_bot_ids, frozenset())
         self.assertEqual(settings.telegram_retry_attempts, 3)
         self.assertEqual(settings.telegram_bootstrap_retries, -1)

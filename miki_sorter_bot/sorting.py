@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ class PendingAlbum:
     source_chat_id: int
     decision: SortDecision | None
     messages: OrderedDict[int, object]
+    first_seen_at: float
 
 
 class RouteMatcher:
@@ -104,7 +106,8 @@ class SortingService:
         self._album_decisions: OrderedDict[tuple[int, str], SortDecision] = OrderedDict()
         self._pending_albums: dict[tuple[int, str], PendingAlbum] = {}
         self._album_flush_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
-        self._album_flush_delay = 1.0
+        self._album_flush_delay = getattr(settings, "album_flush_delay_seconds", 5.0)
+        self._album_max_wait = getattr(settings, "album_max_wait_seconds", 30.0)
 
     async def handle_update(
         self,
@@ -133,8 +136,8 @@ class SortingService:
             decision = self._matcher.decide(text) if text else self._album_decisions.get(album_key)
             if decision is not None:
                 if decision.status == "unmatched":
-                    return
-                if decision.status == "conflict":
+                    decision = None
+                elif decision.status == "conflict":
                     self._record_skip(message, decision)
                     LOGGER.warning(
                         "Sorting conflict",
@@ -178,7 +181,7 @@ class SortingService:
     ) -> None:
         pending = self._pending_albums.get(key)
         if pending is None:
-            pending = PendingAlbum(source_chat_id, decision, OrderedDict())
+            pending = PendingAlbum(source_chat_id, decision, OrderedDict(), time.monotonic())
             self._pending_albums[key] = pending
         elif decision is not None:
             pending.decision = decision
@@ -199,8 +202,11 @@ class SortingService:
             await asyncio.sleep(self._album_flush_delay)
             await self._deliver_album_background(key, context)
         finally:
-            current_task = asyncio.current_task()
-            if self._album_flush_tasks.get(key) is current_task:
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
+            if current_task is not None and self._album_flush_tasks.get(key) is current_task:
                 self._album_flush_tasks.pop(key, None)
                 if key in self._pending_albums:
                     self._album_flush_tasks[key] = asyncio.create_task(
@@ -227,9 +233,39 @@ class SortingService:
         if pending is None:
             return
         if pending.decision is None:
+            if time.monotonic() - pending.first_seen_at < self._album_max_wait:
+                self._pending_albums[key] = pending
+                LOGGER.info(
+                    "Album is waiting for a route decision",
+                    extra={
+                        "source_chat_id": pending.source_chat_id,
+                        "media_group_id": key[1],
+                        "message_count": len(pending.messages),
+                    },
+                )
+                return
+            LOGGER.info(
+                "Dropping unrouted album after decision wait expired",
+                extra={
+                    "source_chat_id": pending.source_chat_id,
+                    "media_group_id": key[1],
+                    "message_count": len(pending.messages),
+                },
+            )
             return
         messages = tuple(
             message for _, message in sorted(pending.messages.items(), key=lambda item: item[0])
+        )
+        LOGGER.info(
+            "Delivering album",
+            extra={
+                "source_chat_id": pending.source_chat_id,
+                "media_group_id": key[1],
+                "message_count": len(messages),
+                "destination_thread_id": pending.decision.topic.thread_id
+                if pending.decision.topic is not None
+                else None,
+            },
         )
         if len(messages) == 1:
             await self._deliver(messages[0], pending.source_chat_id, pending.decision, context)

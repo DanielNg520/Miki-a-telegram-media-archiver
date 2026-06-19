@@ -560,6 +560,99 @@ def test_album_members_wait_for_later_caption_decision(database_connection) -> N
     assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
 
 
+def test_unmatched_caption_album_member_waits_for_later_route(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(
+            return_value=[
+                SimpleNamespace(message_id=90),
+                SimpleNamespace(message_id=91),
+            ]
+        ),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message(
+                    "album intro",
+                    message_id=12,
+                    media_group_id="album-1",
+                ),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message(
+                    "#Japan",
+                    message_id=13,
+                    media_group_id="album-1",
+                ),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_album())
+
+    bot.send_media_group.assert_awaited_once()
+    assert [item.media for item in bot.send_media_group.await_args.kwargs["media"]] == [
+        "file-12",
+        "file-13",
+    ]
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+    assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
+
+
+def test_decisionless_album_stays_pending_until_max_wait_expires(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    service._album_flush_delay = 0.01
+    service._album_max_wait = 60
+    bot = SimpleNamespace(id=50, copy_message=AsyncMock(), send_media_group=AsyncMock())
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message(
+                    "",
+                    message_id=12,
+                    media_group_id="album-1",
+                ),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await asyncio.gather(*service._album_flush_tasks.values())
+
+    asyncio.run(run_album())
+
+    assert (-100, "album-1") in service._pending_albums
+    bot.copy_message.assert_not_awaited()
+    bot.send_media_group.assert_not_awaited()
+
+
 def test_unsupported_album_member_falls_back_to_ordered_copy(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _routes(repositories)

@@ -143,6 +143,13 @@ def main() -> None:
     application.bot_data["repositories"] = repositories
     application.bot_data["settings"] = settings
     application.bot_data["error_reporter"] = error_reporter
+    LOGGER.info(
+        "Album buffering configured",
+        extra={
+            "flush_delay_seconds": settings.album_flush_delay_seconds,
+            "max_wait_seconds": settings.album_max_wait_seconds,
+        },
+    )
     application.add_error_handler(_handle_error)
     _schedule_daily_backup(application, settings, operations, repositories)
     _schedule_sanity_checks(application, settings, repositories)

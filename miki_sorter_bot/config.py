@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: str = Field(default="console", alias="LOG_FORMAT")
     sort_dry_run: bool = Field(default=False, alias="SORT_DRY_RUN")
+    album_flush_delay_seconds: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=30.0,
+        alias="ALBUM_FLUSH_DELAY_SECONDS",
+    )
+    album_max_wait_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        alias="ALBUM_MAX_WAIT_SECONDS",
+    )
     telegram_retry_attempts: int = Field(default=3, ge=1, le=10, alias="TELEGRAM_RETRY_ATTEMPTS")
     telegram_retry_base_delay: float = Field(default=0.5, ge=0, alias="TELEGRAM_RETRY_BASE_DELAY")
     telegram_retry_max_delay: float = Field(default=8.0, ge=0, alias="TELEGRAM_RETRY_MAX_DELAY")
