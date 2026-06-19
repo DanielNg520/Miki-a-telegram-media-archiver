@@ -4,6 +4,7 @@ import logging
 
 from pydantic import ValidationError
 from telegram import Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from miki_sorter_bot.config import get_settings
@@ -170,10 +171,15 @@ async def _handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     error = context.error
     if error is None:
         return
+    repositories = context.application.bot_data.get("repositories")
+    if isinstance(error, (NetworkError, TimedOut)):
+        if repositories is not None:
+            repositories.increment_metric("telegram_polling_network_errors", 1)
+        LOGGER.warning("Telegram polling network error: %s", error)
+        return
     reporter = context.application.bot_data.get("error_reporter")
     if reporter is not None:
         reporter.capture_exception(error)
-    repositories = context.application.bot_data.get("repositories")
     if repositories is not None:
         repositories.increment_metric("application_errors", 1)
     LOGGER.error(

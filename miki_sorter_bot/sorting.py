@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass
 
-from telegram import Update
+from telegram import (
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Update,
+)
 from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
@@ -16,6 +24,8 @@ from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPoli
 
 LOGGER = logging.getLogger(__name__)
 HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
+ALBUM_VISUAL_MEDIA_TYPES = {"photo", "video"}
+ALBUM_HOMOGENEOUS_MEDIA_TYPES = {"audio", "document"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +40,13 @@ class SortDecision:
     topic: TopicRecord | None
     matches: tuple[RouteMatch, ...]
     reason: str
+
+
+@dataclass(slots=True)
+class PendingAlbum:
+    source_chat_id: int
+    decision: SortDecision | None
+    messages: OrderedDict[int, object]
 
 
 class RouteMatcher:
@@ -85,6 +102,9 @@ class SortingService:
         )
         self._matcher = RouteMatcher(repositories, settings.archive_chat_id)
         self._album_decisions: OrderedDict[tuple[int, str], SortDecision] = OrderedDict()
+        self._pending_albums: dict[tuple[int, str], PendingAlbum] = {}
+        self._album_flush_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
+        self._album_flush_delay = 1.0
 
     async def handle_update(
         self,
@@ -109,16 +129,24 @@ class SortingService:
         media_group_id = getattr(message, "media_group_id", None)
         album_key = (chat.id, media_group_id) if media_group_id else None
         text = (message.caption or message.text or "").strip()
-        if text:
-            decision = self._matcher.decide(text)
-            if album_key is not None:
+        if album_key is not None:
+            decision = self._matcher.decide(text) if text else self._album_decisions.get(album_key)
+            if decision is not None:
+                if decision.status == "unmatched":
+                    return
+                if decision.status == "conflict":
+                    self._record_skip(message, decision)
+                    LOGGER.warning(
+                        "Sorting conflict",
+                        extra={"chat_id": chat.id, "message_id": message.message_id},
+                    )
+                    return
                 self._remember_album_decision(album_key, decision)
-        elif album_key is not None:
-            decision = self._album_decisions.get(album_key)
-            if decision is None:
-                return
-        else:
+            self._queue_album_message(album_key, message, chat.id, decision, context)
             return
+        if not text:
+            return
+        decision = self._matcher.decide(text)
         if decision.status == "unmatched":
             return
         if decision.status == "conflict":
@@ -139,6 +167,101 @@ class SortingService:
         self._album_decisions.move_to_end(key)
         while len(self._album_decisions) > 1000:
             self._album_decisions.popitem(last=False)
+
+    def _queue_album_message(
+        self,
+        key: tuple[int, str],
+        message: object,
+        source_chat_id: int,
+        decision: SortDecision | None,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        pending = self._pending_albums.get(key)
+        if pending is None:
+            pending = PendingAlbum(source_chat_id, decision, OrderedDict())
+            self._pending_albums[key] = pending
+        elif decision is not None:
+            pending.decision = decision
+        pending.messages[message.message_id] = message
+        existing_task = self._album_flush_tasks.get(key)
+        if existing_task is not None and not existing_task.done():
+            existing_task.cancel()
+        self._album_flush_tasks[key] = asyncio.create_task(
+            self._flush_album_after_delay(key, context)
+        )
+
+    async def _flush_album_after_delay(
+        self,
+        key: tuple[int, str],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        try:
+            await asyncio.sleep(self._album_flush_delay)
+            await self._deliver_album_background(key, context)
+        finally:
+            current_task = asyncio.current_task()
+            if self._album_flush_tasks.get(key) is current_task:
+                self._album_flush_tasks.pop(key, None)
+                if key in self._pending_albums:
+                    self._album_flush_tasks[key] = asyncio.create_task(
+                        self._flush_album_after_delay(key, context)
+                    )
+
+    async def flush_pending_albums(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        tasks = tuple(self._album_flush_tasks.values())
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        keys = tuple(self._pending_albums)
+        for key in keys:
+            await self._deliver_album(key, context)
+
+    async def _deliver_album(
+        self,
+        key: tuple[int, str],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        pending = self._pending_albums.pop(key, None)
+        if pending is None:
+            return
+        if pending.decision is None:
+            return
+        messages = tuple(
+            message for _, message in sorted(pending.messages.items(), key=lambda item: item[0])
+        )
+        if len(messages) == 1:
+            await self._deliver(messages[0], pending.source_chat_id, pending.decision, context)
+            return
+        if await self._deliver_media_group(
+            messages,
+            pending.source_chat_id,
+            pending.decision,
+            context,
+        ):
+            return
+        for message in messages:
+            await self._deliver(message, pending.source_chat_id, pending.decision, context)
+
+    async def _deliver_album_background(
+        self,
+        key: tuple[int, str],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        try:
+            await self._deliver_album(key, context)
+        except Exception as error:
+            failure = classify_error(error)
+            self._repositories.increment_metric("album_flush_failures", 1)
+            LOGGER.warning(
+                "Album flush failed",
+                extra={
+                    "source_chat_id": key[0],
+                    "media_group_id": key[1],
+                    "error_category": failure.category,
+                },
+            )
 
     async def _deliver(
         self,
@@ -219,6 +342,125 @@ class SortingService:
         if self._settings.send_confirmation:
             await message.reply_text(f"Sorted to {decision.topic.name}.", quote=True)
 
+    async def _deliver_media_group(
+        self,
+        messages: tuple[object, ...],
+        source_chat_id: int,
+        decision: SortDecision,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        assert decision.topic is not None
+        media = _media_group_payload(messages)
+        if media is None:
+            return False
+
+        completed_count = 0
+        deliveries = []
+        for message in messages:
+            key = (
+                f"sort:{source_chat_id}:{message.message_id}:"
+                f"{self._settings.archive_chat_id}:{decision.topic.thread_id}"
+            )
+            job = self._repositories.enqueue(
+                "sort",
+                key,
+                {
+                    "source_chat_id": source_chat_id,
+                    "source_message_id": message.message_id,
+                    "destination_chat_id": self._settings.archive_chat_id,
+                    "destination_thread_id": decision.topic.thread_id,
+                    "reason": decision.reason,
+                    "delivery_method": "send_media_group",
+                },
+            )
+            delivery = self._repositories.ensure_delivery(
+                job.id,
+                source_chat_id=source_chat_id,
+                source_message_id=message.message_id,
+                destination_chat_id=self._settings.archive_chat_id,
+                destination_thread_id=decision.topic.thread_id,
+                reason=decision.reason,
+            )
+            if delivery.status in {"sent", "skipped"}:
+                completed_count += 1
+                continue
+            if self._settings.sort_dry_run:
+                self._repositories.update_delivery(delivery.id, "skipped", reason="dry-run")
+                self._repositories.update_job(job.id, "completed")
+                continue
+            self._repositories.update_job(job.id, "running")
+            deliveries.append((message, job, delivery))
+        if deliveries and completed_count:
+            self._repositories.increment_metric("media_group_fallbacks", 1)
+            LOGGER.info(
+                "Album delivery has prior completed members; falling back to individual copies",
+                extra={
+                    "source_chat_id": source_chat_id,
+                    "media_group_id": getattr(messages[0], "media_group_id", None),
+                    "pending_count": len(deliveries),
+                    "album_count": len(messages),
+                },
+            )
+            return False
+        if completed_count:
+            self._repositories.increment_metric("sort_duplicates", completed_count)
+        if not deliveries or self._settings.sort_dry_run:
+            return True
+
+        try:
+            sent_messages = await self._delivery_executor.run(
+                lambda: context.bot.send_media_group(
+                    chat_id=self._settings.archive_chat_id,
+                    media=media,
+                    message_thread_id=decision.topic.thread_id,
+                )
+            )
+        except Exception as error:
+            failure = classify_error(error)
+            self._repositories.increment_metric("media_group_fallbacks", 1)
+            LOGGER.warning(
+                "Grouped album delivery failed; falling back to individual copies",
+                extra={
+                    "source_chat_id": source_chat_id,
+                    "media_group_id": getattr(messages[0], "media_group_id", None),
+                    "error_category": failure.category,
+                },
+            )
+            return False
+
+        sent_ids = [sent.message_id for sent in sent_messages]
+        if len(sent_ids) != len(deliveries):
+            self._repositories.increment_metric("media_group_fallbacks", 1)
+            LOGGER.warning(
+                "Grouped album delivery returned an unexpected number of messages",
+                extra={
+                    "source_chat_id": source_chat_id,
+                    "expected_count": len(deliveries),
+                    "actual_count": len(sent_ids),
+                },
+            )
+            return False
+
+        for (message, job, delivery), destination_message_id in zip(deliveries, sent_ids):
+            self._repositories.update_delivery(
+                delivery.id,
+                "sent",
+                destination_message_id=destination_message_id,
+            )
+            self._repositories.update_job(job.id, "completed")
+            self._repositories.increment_metric("sort_deliveries", 1)
+            self._audit(message, "sort.media_group", "success", str(job.id))
+            self._indexing.index_copy(
+                message,
+                bot_id=context.bot.id,
+                destination_chat_id=self._settings.archive_chat_id,
+                destination_thread_id=decision.topic.thread_id,
+                destination_message_id=destination_message_id,
+            )
+        if self._settings.send_confirmation:
+            await messages[0].reply_text(f"Sorted to {decision.topic.name}.", quote=True)
+        return True
+
     def _record_skip(self, message: object, decision: SortDecision) -> None:
         key = f"sort-conflict:{self._settings.source_chat_id}:{message.message_id}"
         job = self._repositories.enqueue(
@@ -294,3 +536,48 @@ def _matching_non_hashtags(
             )
         )
     ]
+
+
+def _media_group_payload(
+    messages: tuple[object, ...],
+) -> tuple[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio, ...] | None:
+    media_types = tuple(media_type(message) for message in messages)
+    if any(kind is None for kind in media_types):
+        return None
+    unique_types = set(media_types)
+    if not (
+        unique_types <= ALBUM_VISUAL_MEDIA_TYPES
+        or len(unique_types) == 1
+        and next(iter(unique_types)) in ALBUM_HOMOGENEOUS_MEDIA_TYPES
+    ):
+        return None
+
+    payload = []
+    for message, kind in zip(messages, media_types):
+        media_id = _album_file_id(message, kind)
+        if media_id is None:
+            return None
+        caption = (getattr(message, "caption", None) or "").strip() or None
+        caption_entities = getattr(message, "caption_entities", None)
+        kwargs = {"caption": caption, "caption_entities": caption_entities}
+        if kind == "photo":
+            payload.append(InputMediaPhoto(media_id, **kwargs))
+        elif kind == "video":
+            payload.append(InputMediaVideo(media_id, **kwargs))
+        elif kind == "document":
+            payload.append(InputMediaDocument(media_id, **kwargs))
+        elif kind == "audio":
+            payload.append(InputMediaAudio(media_id, **kwargs))
+        else:
+            return None
+    return tuple(payload)
+
+
+def _album_file_id(message: object, kind: str | None) -> str | None:
+    if kind == "photo":
+        photos = getattr(message, "photo", None) or ()
+        if not photos:
+            return None
+        return getattr(photos[-1], "file_id", None)
+    media = getattr(message, kind or "", None)
+    return getattr(media, "file_id", None)

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from telegram import Update
+from telegram.error import NetworkError
 
 from miki_sorter_bot.main import (
     _handle_error,
@@ -144,6 +145,25 @@ def test_error_handler_reports_and_counts_errors() -> None:
 
     reporter.capture_exception.assert_called_once_with(error)
     repositories.increment_metric.assert_called_once_with("application_errors", 1)
+
+
+def test_error_handler_counts_network_errors_without_reporting() -> None:
+    import asyncio
+
+    error = NetworkError("Bad Gateway")
+    reporter = SimpleNamespace(capture_exception=Mock())
+    repositories = SimpleNamespace(increment_metric=Mock())
+    context = SimpleNamespace(
+        error=error,
+        application=SimpleNamespace(
+            bot_data={"error_reporter": reporter, "repositories": repositories}
+        ),
+    )
+
+    asyncio.run(_handle_error(None, context))
+
+    reporter.capture_exception.assert_not_called()
+    repositories.increment_metric.assert_called_once_with("telegram_polling_network_errors", 1)
 
 
 def test_non_ok_summary_filters_successful_checks() -> None:
