@@ -43,6 +43,13 @@ EXTRA_KEYS_TO_SHOW = (
     "job_id",
     "post_id",
     "error_category",
+    "source_chat_id",
+    "media_group_id",
+    "message_count",
+    "caption_count",
+    "destination_thread_id",
+    "flush_delay_seconds",
+    "max_wait_seconds",
 )
 NOISY_LOGGERS = (
     "apscheduler",

@@ -144,7 +144,8 @@ class SortingService:
                         extra={"chat_id": chat.id, "message_id": message.message_id},
                     )
                     return
-                self._remember_album_decision(album_key, decision)
+                else:
+                    self._remember_album_decision(album_key, decision)
             self._queue_album_message(album_key, message, chat.id, decision, context)
             return
         if not text:
@@ -233,6 +234,8 @@ class SortingService:
         if pending is None:
             return
         if pending.decision is None:
+            pending.decision = self._decide_album_text(pending)
+        if pending.decision is None:
             if time.monotonic() - pending.first_seen_at < self._album_max_wait:
                 self._pending_albums[key] = pending
                 LOGGER.info(
@@ -241,6 +244,7 @@ class SortingService:
                         "source_chat_id": pending.source_chat_id,
                         "media_group_id": key[1],
                         "message_count": len(pending.messages),
+                        "caption_count": _album_caption_count(tuple(pending.messages.values())),
                     },
                 )
                 return
@@ -250,6 +254,7 @@ class SortingService:
                     "source_chat_id": pending.source_chat_id,
                     "media_group_id": key[1],
                     "message_count": len(pending.messages),
+                    "caption_count": _album_caption_count(tuple(pending.messages.values())),
                 },
             )
             return
@@ -377,6 +382,25 @@ class SortingService:
         )
         if self._settings.send_confirmation:
             await message.reply_text(f"Sorted to {decision.topic.name}.", quote=True)
+
+    def _decide_album_text(self, pending: PendingAlbum) -> SortDecision | None:
+        text = _album_text(tuple(pending.messages.values()))
+        if not text:
+            return None
+        decision = self._matcher.decide(text)
+        if decision.status == "matched":
+            return decision
+        if decision.status == "conflict":
+            for message in pending.messages.values():
+                self._record_skip(message, decision)
+            LOGGER.warning(
+                "Album sorting conflict",
+                extra={
+                    "source_chat_id": pending.source_chat_id,
+                    "message_count": len(pending.messages),
+                },
+            )
+        return None
 
     async def _deliver_media_group(
         self,
@@ -572,6 +596,22 @@ def _matching_non_hashtags(
             )
         )
     ]
+
+
+def _album_text(messages: tuple[object, ...]) -> str:
+    return "\n".join(
+        text
+        for message in messages
+        if (text := _message_text(message))
+    )
+
+
+def _album_caption_count(messages: tuple[object, ...]) -> int:
+    return sum(1 for message in messages if _message_text(message))
+
+
+def _message_text(message: object) -> str:
+    return (getattr(message, "caption", None) or getattr(message, "text", None) or "").strip()
 
 
 def _media_group_payload(
