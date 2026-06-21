@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from miki_sorter_bot.instance_lock import AlreadyRunningError, InstanceLock
+
 
 async def show_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
@@ -78,16 +80,25 @@ def main() -> None:
     if not token:
         raise SystemExit("Missing bot token. Set BOT_TOKEN in .env or pass --token.")
 
-    application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler("show_ids", show_ids))
-    application.add_handler(CommandHandler("where", show_ids))
+    lock = InstanceLock(token, role="show-ids")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as error:
+        raise SystemExit(str(error)) from error
 
-    print(
-        "Listening for /show_ids or /where. "
-        "Send either command in the Telegram topic you want to identify."
-    )
-    print("Press Ctrl+C to stop.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application = Application.builder().token(token).build()
+        application.add_handler(CommandHandler("show_ids", show_ids))
+        application.add_handler(CommandHandler("where", show_ids))
+
+        print(
+            "Listening for /show_ids or /where. "
+            "Send either command in the Telegram topic you want to identify."
+        )
+        print("Press Ctrl+C to stop.")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

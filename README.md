@@ -151,8 +151,10 @@ For initial setup, before the full bot configuration is valid, run the standalon
 miki-show-ids
 ```
 
-Then send `/show_ids` or `/where` inside the target topic. Do not run this listener at the same
-time as `miki-sorter` with the same bot token because Telegram permits only one polling process.
+Then send `/show_ids` or `/where` inside the target topic. Miki enforces one local process per bot
+token with an operating-system lock: starting another sorter or this listener with the same token
+exits immediately and reports the PID holding the lock. Telegram permits only one polling process;
+deployments on different hosts must still use distinct tokens or ensure only one host is active.
 
 To run local deployment checks without inspecting SQLite manually:
 

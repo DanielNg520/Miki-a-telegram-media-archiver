@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from miki_sorter_bot.config import get_settings
+from miki_sorter_bot.config import Settings, get_settings
 from miki_sorter_bot.diagnostics import DiagnosticReport, run_diagnostics
 from miki_sorter_bot.error_reporting import configure_error_reporter
 from miki_sorter_bot.health_server import HealthServer
@@ -19,6 +19,7 @@ from miki_sorter_bot.logging_config import (
 )
 from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.integrations import IntegrationService
+from miki_sorter_bot.instance_lock import AlreadyRunningError, InstanceLock
 from miki_sorter_bot.management import ManagementCommands
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.recovery import JobRecoveryService
@@ -68,6 +69,19 @@ def main() -> None:
             for issue in error.errors()
         )
         raise SystemExit(f"Invalid bot configuration: {messages}") from error
+
+    lock = InstanceLock(settings.bot_token, role="sorter")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as error:
+        raise SystemExit(str(error)) from error
+    try:
+        _run(settings)
+    finally:
+        lock.release()
+
+
+def _run(settings: Settings) -> None:
 
     configure_logging(settings.log_level, settings.log_format)
     error_reporter = configure_error_reporter(
