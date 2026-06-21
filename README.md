@@ -23,6 +23,17 @@ Use a regular install for the runnable bot. On recent macOS/Python versions, edi
 installs inside a hidden `.venv` can leave console commands unable to import the package.
 Re-run `pip install . --force-reinstall` after code changes.
 
+For development and the complete local verification matrix:
+
+```bash
+pip install ".[dev]"
+make verify
+make audit  # online dependency vulnerability lookup
+```
+
+`make runtime-check` runs diagnostics against the configured live `.env` and database; it is kept
+separate from the hermetic build/test matrix.
+
 ## Configure
 
 Copy `.env.sample` to `.env` and fill in your real values.
@@ -36,6 +47,9 @@ Important IDs:
 - `SOURCE_CHAT_ID`: main supergroup ID, usually a negative number like `-1001234567890`.
 - `SOURCE_THREAD_ID`: forum topic ID that Miki should watch.
 - `ARCHIVE_CHAT_ID`: archive supergroup ID.
+- `TOPIC_FORWARDING_JSON`: optional source-topic → archive-topic pairs. Every supported attachment
+  in a listed source topic is copied to its registered destination without requiring a hashtag,
+  keyword, phrase, or caption. Source topics must be unique; multiple sources may share a destination.
 - `REQUEST_CHAT_ID`: supergroup where retrieval requests are submitted and results are copied.
   Leave blank to use `ARCHIVE_CHAT_ID`.
 - `COLLECTOR_URL`: Data Collector API URL.
@@ -49,6 +63,8 @@ Important IDs:
 - `LOG_LEVEL` and `LOG_FORMAT`: application logging controls. Use `LOG_FORMAT=console` for a
   readable local terminal, or `LOG_FORMAT=json` for structured hosted logs.
 - `SORT_DRY_RUN`: resolve and record routes without copying media.
+- `JOB_RECOVERY_INTERVAL_SECONDS` and `JOB_RECOVERY_BATCH_SIZE`: control the bounded worker that
+  atomically resumes interrupted sorting/retrieval jobs and operator-requeued dead letters.
 - `TELEGRAM_STARTUP_CHECKIN_ENABLED`: sends admins or `TELEGRAM_NOTIFICATION_CHAT_IDS` a startup
   `/doctor` summary.
 - `HEALTH_SERVER_ENABLED`: starts optional `/healthz` and `/metrics` endpoints for polling/VPS
@@ -59,6 +75,16 @@ Important IDs:
 
 `COLLECTOR_*` and `ROUTES_JSON` are legacy-compatible settings. The active sorter uses registered
 database mappings.
+
+Example direct forwarding (all topic IDs are within `SOURCE_CHAT_ID` and `ARCHIVE_CHAT_ID`):
+
+```json
+[
+  {"source_thread_id": 101, "destination_thread_id": 901},
+  {"source_thread_id": 102, "destination_thread_id": 902},
+  {"source_thread_id": 103, "destination_thread_id": 902}
+]
+```
 
 The bot validates configuration before connecting to Telegram. IDs and credentials cannot
 be blank; every route must have keywords; route names and destination thread IDs must be
@@ -196,7 +222,7 @@ is a `keyword`; a `"quoted phrase"` is a `phrase`.
 
 | Command | Who | Usage |
 | --- | --- | --- |
-| `/keyword_add <topic_id> <keyword or "phrase">` | Manager | `/keyword_add 7 TOKYO` or `/keyword_add 7 "Mount Fuji"` |
+| `/keyword_add <topic_id> <keyword or "phrase"[, ...]>` | Manager | `/keyword_add 7 TOKYO, "Mount Fuji"` |
 | `/keyword_remove <topic_id> <value>` | Manager | `/keyword_remove 7 TOKYO` |
 | `/keyword_replace <topic_id> <value>` | Manager | Moves an existing keyword/phrase to a different topic. |
 | `/keyword_list [topic_id]` | Manager | Lists all keyword **and** phrase routes; optional topic filter. |
@@ -208,7 +234,7 @@ Hashtag routes match `#tags` in a post's caption.
 
 | Command | Who | Usage |
 | --- | --- | --- |
-| `/hashtag_add <topic_id> <hashtag>` | Manager | `/hashtag_add 7 travel` |
+| `/hashtag_add <topic_id> <hashtag> [...]` | Manager | `/hashtag_add 7 travel #tokyo` or `/hashtag_add 7 travel, #tokyo` |
 | `/hashtag_remove <topic_id> <hashtag>` | Manager | `/hashtag_remove 7 travel` |
 | `/hashtag_replace <topic_id> <hashtag>` | Manager | Moves a hashtag route to a different topic. |
 | `/hashtag_list [topic_id]` | Manager | Lists hashtag routes; optional topic filter. |
@@ -280,12 +306,12 @@ topic. Miki must be an administrator in that forum. Use `/topic_list` to inspect
 Route commands:
 
 ```text
-/hashtag_add <topic_id> <hashtag>
+/hashtag_add <topic_id> <hashtag> [...]
 /hashtag_replace <topic_id> <hashtag>
 /hashtag_remove <topic_id> <hashtag>
 /hashtag_list [topic_id]
 
-/keyword_add <topic_id> <keyword or quoted phrase>
+/keyword_add <topic_id> <keyword or quoted phrase>[, ...]
 /keyword_replace <topic_id> <keyword or quoted phrase>
 /keyword_remove <topic_id> <keyword or quoted phrase>
 /keyword_list [topic_id]
@@ -357,6 +383,22 @@ transport-neutral contract. Administrators can inspect recent events with `/audi
 ## Operations
 
 Administrators can use `/health`, `/status`, `/maintenance`, and `/backup`.
+
+Local terminal operations are also available through `miki-ops`, modeled after the Archiver Suite
+ops console:
+
+```bash
+miki-ops health
+miki-ops watch --interval 3
+miki-ops status
+miki-ops doctor
+miki-ops backup
+miki-ops maintenance
+miki-ops logrotate
+miki-ops install
+miki-ops load
+miki-ops restart
+```
 
 A **daily automatic backup** runs in-process via the bot's job queue (no external
 cron needed). Each run takes a verified online SQLite snapshot (consistent under

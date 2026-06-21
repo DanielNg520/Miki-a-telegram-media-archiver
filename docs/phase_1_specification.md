@@ -70,33 +70,38 @@ artifacts, not source-of-truth code.
 
 ## J03 - Sorter Syntax and Rules
 
-Miki evaluates the text or caption attached to supported media in the configured intake topic.
+Miki first checks whether supported media arrived in a directly forwarded source topic. If it did,
+the configured source-topic → archive-topic pair determines the destination without inspecting the
+message. Otherwise, Miki evaluates the text or caption in the legacy configured intake topic.
 
 ### Route Inputs
 
 Routes may be triggered by:
 
-1. An explicit hashtag, such as `#Japan`.
-2. A configured keyword, such as `ABC`.
-3. A configured phrase, such as `New York`.
+1. A direct topic forwarding pair.
+2. An explicit hashtag, such as `#Japan`.
+3. A configured keyword, such as `ABC`.
+4. A configured phrase, such as `New York`.
 
 Matching is Unicode-aware and case-insensitive.
 
 - Hashtags match the complete hashtag.
-- Single keywords match anywhere within an individual token.
-- Phrases match complete consecutive tokens separated by ordinary whitespace or punctuation.
-- `abc` matches both `ABC` and `ABC123`, but does not span separate tokens.
-- A message without text or a caption is not routed automatically.
+- Single keywords match whole alphanumeric terms, with punctuation or text edges as boundaries.
+- Phrases match complete consecutive words separated only by whitespace.
+- `abc` matches `ABC` and `(ABC)-`, but not `ABC123` or `a bc`.
+- A message without text or a caption is not routed by text rules, but remains eligible for a
+  direct topic forwarding pair.
 
 ### Routing Precedence
 
-1. Explicit hashtag routes take priority over keyword and phrase routes.
-2. A single matched destination is copied to that destination.
-3. Several matching rules for the same destination still produce only one copy.
-4. Matches for different destinations are considered a conflict.
-5. A conflict is not copied automatically. Miki records it and reports it to an authorized user.
-6. Route configuration order must not silently decide a conflict.
-7. Unknown hashtags do not block a valid configured keyword match.
+1. Direct topic forwarding takes priority over all text routes.
+2. Explicit hashtag routes take priority over keyword and phrase routes.
+3. A single matched destination is copied to that destination.
+4. Several matching rules for the same destination still produce only one copy.
+5. Matches for different destinations are considered a conflict.
+6. A conflict is not copied automatically. Miki records it and reports it to an authorized user.
+7. Route configuration order must not silently decide a conflict.
+8. Unknown hashtags do not block a valid configured keyword match.
 
 This conservative conflict policy prevents accidental duplication and misfiling.
 
@@ -192,16 +197,19 @@ so a lowercase routing keyword such as `abc` remains searchable.
 
 1. Media captioned `Trip to Tokyo #Japan` routes to the registered `#Japan` topic.
 2. Media captioned `new ABC release` routes to the topic mapped to keyword `abc`.
-3. Keyword `abc` matches identifiers such as `abcdef` and `ABC123`.
+3. Keyword `abc` matches `ABC` surrounded by punctuation, but not identifiers such as `abcdef` or `ABC123`.
 4. Phrase `New York` matches `NEW YORK`, but not `new project in York`.
 5. A hashtag and keyword targeting the same topic create one copy.
 6. Matches targeting two different topics create no copy and record a conflict.
 7. An unknown hashtag plus one valid keyword routes using the valid keyword.
 8. Plain text without media is not sorted.
-9. Media outside the intake topic is not sorted.
+9. Media outside the legacy intake topic is sorted only when its source topic has a direct
+   forwarding pair.
 10. Reprocessing the same Telegram update does not create another copy.
 11. Miki does not recursively sort a copy that Miki created.
 12. Every item in one album reaches the same destination in its original order.
+13. Captionless attachments in directly forwarded topics reach their configured destination.
+14. Multiple source topics may forward to the same archive topic.
 
 ### Keyword Administration
 

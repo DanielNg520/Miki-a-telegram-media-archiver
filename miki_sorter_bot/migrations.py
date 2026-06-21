@@ -282,8 +282,7 @@ def migrate(connection: sqlite3.Connection) -> list[Migration]:
         """
     )
     applied = {
-        row[0]
-        for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+        row[0] for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
     }
     completed: list[Migration] = []
     for migration in MIGRATIONS:

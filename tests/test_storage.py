@@ -14,8 +14,6 @@ def test_storage_creates_parent_directory_and_migrates(tmp_path) -> None:
     assert database_path.exists()
     connection = sqlite3.connect(database_path)
     try:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations"
-        ).fetchone()[0] == 7
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 7
     finally:
         connection.close()

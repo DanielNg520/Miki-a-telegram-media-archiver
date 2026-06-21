@@ -10,9 +10,7 @@ CORRELATION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "correlation_id",
     default="-",
 )
-STANDARD_LOG_RECORD_FIELDS = frozenset(
-    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
-)
+STANDARD_LOG_RECORD_FIELDS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 REDACTED_KEYS = frozenset(
     {
         "api_key",

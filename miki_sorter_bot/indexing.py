@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from miki_sorter_bot.config import Settings
 from miki_sorter_bot.repositories import IndexedPostInput, SearchToken, SqliteRepositories
 
-EXTRACTOR_VERSION = 3
+EXTRACTOR_VERSION = 4
 TOKEN_RE = re.compile(r"[^\W_]+(?:-[^\W_]+)*", re.UNICODE)
 HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
 SENTENCE_END_RE = re.compile(r"[.!?]\s*$")
@@ -52,16 +52,13 @@ def extract_search_tokens(
             tokens.add(SearchToken(kind, value, value.casefold()))
         previous_end = match.end()
 
-    normalized_text = " ".join(match.group(0).casefold() for match in TOKEN_RE.finditer(text))
     for kind, configured_value in configured_values or set():
         normalized_value = " ".join(configured_value.casefold().split())
         if kind == "hashtag":
             continue
-        if kind == "keyword" and any(
-            normalized_value in token for token in normalized_text.split()
-        ):
+        if kind == "keyword" and contains_keyword(text, normalized_value):
             tokens.add(SearchToken("keyword", configured_value, normalized_value))
-        elif kind == "phrase" and _contains_phrase(normalized_text, normalized_value):
+        elif kind == "phrase" and contains_phrase(text, normalized_value):
             tokens.add(SearchToken("phrase", configured_value, normalized_value))
     return ExtractionResult(frozenset(tokens))
 
@@ -231,6 +228,15 @@ def _starts_sentence(text: str, start: int, previous_end: int) -> bool:
     return bool(SENTENCE_END_RE.search(text[previous_end:start]))
 
 
-def _contains_phrase(normalized_text: str, normalized_phrase: str) -> bool:
-    padded_text = f" {normalized_text} "
-    return f" {normalized_phrase} " in padded_text
+def contains_keyword(text: str, normalized_keyword: str) -> bool:
+    """Match a keyword bounded by non-alphanumeric characters or text edges."""
+    pattern = rf"(?<![^\W_]){re.escape(normalized_keyword)}(?![^\W_])"
+    return re.search(pattern, text.casefold(), re.UNICODE) is not None
+
+
+def contains_phrase(text: str, normalized_phrase: str) -> bool:
+    """Match complete phrase words separated only by whitespace."""
+    words = normalized_phrase.split()
+    pattern = r"\s+".join(re.escape(word) for word in words)
+    bounded_pattern = rf"(?<![^\W_]){pattern}(?![^\W_])"
+    return re.search(bounded_pattern, text.casefold(), re.UNICODE) is not None

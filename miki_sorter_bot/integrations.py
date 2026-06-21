@@ -124,10 +124,14 @@ class IntegrationService:
         try:
             timestamp_value = int(timestamp)
         except ValueError as error:
-            raise IntegrationError(401, "invalid_timestamp", "Timestamp must be Unix seconds.") from error
+            raise IntegrationError(
+                401, "invalid_timestamp", "Timestamp must be Unix seconds."
+            ) from error
         now = int(self._now())
         if abs(now - timestamp_value) > self._settings.integration_signature_ttl:
-            raise IntegrationError(401, "stale_timestamp", "Timestamp is outside the allowed window.")
+            raise IntegrationError(
+                401, "stale_timestamp", "Timestamp is outside the allowed window."
+            )
         canonical = timestamp.encode() + b"\n" + nonce.encode() + b"\n" + body
         expected = hmac.new(client.secret.encode(), canonical, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature.casefold()):
@@ -160,14 +164,18 @@ class IntegrationService:
         if not isinstance(payload, dict):
             raise IntegrationError(400, "invalid_request", "Request body must be an object.")
         if payload.get("version") != CONTRACT_VERSION:
-            raise IntegrationError(400, "unsupported_version", "Only contract version 1 is supported.")
+            raise IntegrationError(
+                400, "unsupported_version", "Only contract version 1 is supported."
+            )
         request_id = payload.get("request_id")
         operation = payload.get("operation")
         data = payload.get("data", {})
         if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
             raise IntegrationError(400, "invalid_request_id", "request_id is required and bounded.")
         if not isinstance(operation, str) or not isinstance(data, dict):
-            raise IntegrationError(400, "invalid_request", "operation and object data are required.")
+            raise IntegrationError(
+                400, "invalid_request", "operation and object data are required."
+            )
         return {
             "version": CONTRACT_VERSION,
             "request_id": request_id,
@@ -210,8 +218,10 @@ class IntegrationService:
         limit = data.get("limit", self._settings.default_request_limit)
         if not isinstance(thread_id, int) or thread_id <= 0:
             raise IntegrationError(400, "invalid_topic", "topic_id must be a positive integer.")
-        if not isinstance(keywords, list) or not keywords or not all(
-            isinstance(value, str) and value.strip() for value in keywords
+        if (
+            not isinstance(keywords, list)
+            or not keywords
+            or not all(isinstance(value, str) and value.strip() for value in keywords)
         ):
             raise IntegrationError(400, "invalid_keywords", "keywords must be non-empty strings.")
         if match_mode not in {"all", "any"}:

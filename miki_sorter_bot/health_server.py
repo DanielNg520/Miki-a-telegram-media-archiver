@@ -54,7 +54,15 @@ class HealthServer:
 def _handler(status_provider: MetricProvider) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
-            status = status_provider()
+            try:
+                status = status_provider()
+            except Exception:
+                LOGGER.exception("Health status provider failed")
+                self._send_json(
+                    {"ok": False, "error": "status_unavailable"},
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
             if self.path == "/healthz":
                 healthy = status.get("database") == "ok" and status.get("foreign_keys") is True
                 body = {"ok": healthy, "database": status.get("database")}

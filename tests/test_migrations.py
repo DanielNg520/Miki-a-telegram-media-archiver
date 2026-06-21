@@ -38,9 +38,7 @@ def test_migrations_are_idempotent(database_connection) -> None:
     versions = database_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
-    assert [row["version"] for row in versions] == [
-        migration.version for migration in MIGRATIONS
-    ]
+    assert [row["version"] for row in versions] == [migration.version for migration in MIGRATIONS]
 
 
 def test_route_mapping_cannot_point_to_an_unknown_topic(database_connection) -> None:
@@ -91,13 +89,9 @@ def test_phase_two_database_upgrades_without_losing_mappings() -> None:
 
     migrate(connection)
 
-    mapping = connection.execute(
-        "SELECT value, normalized_value FROM route_mappings"
-    ).fetchone()
+    mapping = connection.execute("SELECT value, normalized_value FROM route_mappings").fetchone()
     assert (mapping["value"], mapping["normalized_value"]) == ("ABC", "abc")
-    assert connection.execute(
-        "SELECT COUNT(*) FROM schema_migrations"
-        ).fetchone()[0] == 7
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 7
     connection.close()
 
 
@@ -128,9 +122,7 @@ def test_upgrade_from_every_schema_boundary(applied_count) -> None:
     versions = connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
-    assert [row["version"] for row in versions] == [
-        migration.version for migration in MIGRATIONS
-    ]
+    assert [row["version"] for row in versions] == [migration.version for migration in MIGRATIONS]
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()

@@ -160,6 +160,8 @@ class ProcessedUpdateRepository(Protocol):
 class JobRepository(Protocol):
     def enqueue(self, kind: str, idempotency_key: str, payload: dict[str, Any]) -> JobRecord: ...
 
+    def claim_job(self, job_id: int) -> bool: ...
+
     def update_job(self, job_id: int, status: str, *, error: str | None = None) -> None: ...
 
 
@@ -284,7 +286,7 @@ class SqliteRepositories:
                 cursor = self._connection.execute(
                     f"""
                     UPDATE topics
-                    SET {', '.join(assignments)}
+                    SET {", ".join(assignments)}
                     WHERE chat_id = ? AND thread_id = ?
                     """,
                     parameters,
@@ -406,7 +408,7 @@ class SqliteRepositories:
                    route_mappings.created_by_user_id
             FROM route_mappings
             JOIN topics ON topics.id = route_mappings.topic_id
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY topics.name COLLATE NOCASE, route_mappings.kind,
                      route_mappings.normalized_value
             """,
@@ -607,8 +609,7 @@ class SqliteRepositories:
             (post_id,),
         ).fetchall()
         return frozenset(
-            SearchToken(row["kind"], row["value"], row["normalized_value"])
-            for row in rows
+            SearchToken(row["kind"], row["value"], row["normalized_value"]) for row in rows
         )
 
     def reindex_batch(
@@ -839,6 +840,8 @@ class SqliteRepositories:
                 """,
                 (job_id, operation, serialized, error_category, error_message),
             )
+        if cursor.lastrowid is None:
+            raise RuntimeError("dead-letter insert did not return an ID")
         return int(cursor.lastrowid)
 
     def list_dead_letters(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -866,13 +869,13 @@ class SqliteRepositories:
             for row in rows
         ]
 
-    def retry_dead_letter(self, dead_letter_id: int) -> bool:
+    def retry_dead_letter(self, dead_letter_id: int) -> int | None:
         row = self._connection.execute(
             "SELECT job_id FROM dead_letters WHERE id = ? AND resolved_at IS NULL",
             (dead_letter_id,),
         ).fetchone()
         if row is None or row["job_id"] is None:
-            return False
+            return None
         with self._connection:
             self._connection.execute(
                 """
@@ -886,7 +889,7 @@ class SqliteRepositories:
                 "UPDATE dead_letters SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (dead_letter_id,),
             )
-        return True
+        return int(row["job_id"])
 
     def claim_integration_nonce(
         self,
@@ -981,6 +984,8 @@ class SqliteRepositories:
                     correlation_id,
                 ),
             )
+        if cursor.lastrowid is None:
+            raise RuntimeError("audit insert did not return an ID")
         return int(cursor.lastrowid)
 
     def list_audit_events(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -1067,6 +1072,58 @@ class SqliteRepositories:
                 """,
                 (status, error, job_id),
             )
+            if status == "completed":
+                self._connection.execute(
+                    """
+                    UPDATE dead_letters
+                    SET resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP)
+                    WHERE job_id = ?
+                    """,
+                    (job_id,),
+                )
+
+    def claim_job(self, job_id: int) -> bool:
+        """Atomically acquire a runnable job for exactly one worker."""
+
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'running', attempts = attempts + 1,
+                    last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND status IN ('pending', 'failed')
+                  AND datetime(available_at) <= datetime('now')
+                """,
+                (job_id,),
+            )
+        return cursor.rowcount == 1
+
+    def list_pending_jobs(self, limit: int = 100) -> list[JobRecord]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("pending job limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            """
+            SELECT id, kind, status, idempotency_key, payload_json, attempts
+            FROM jobs
+            WHERE status = 'pending'
+              AND datetime(available_at) <= datetime('now')
+            ORDER BY available_at, id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            JobRecord(
+                id=row["id"],
+                kind=row["kind"],
+                status=row["status"],
+                idempotency_key=row["idempotency_key"],
+                payload=json.loads(row["payload_json"]),
+                attempts=row["attempts"],
+            )
+            for row in rows
+        ]
 
     def ensure_delivery(
         self,
@@ -1212,9 +1269,7 @@ class SqliteRepositories:
         }
         return {
             "database": self._connection.execute("PRAGMA quick_check").fetchone()[0],
-            "foreign_keys": bool(
-                self._connection.execute("PRAGMA foreign_keys").fetchone()[0]
-            ),
+            "foreign_keys": bool(self._connection.execute("PRAGMA foreign_keys").fetchone()[0]),
             "posts": self._connection.execute(
                 "SELECT COUNT(*) FROM posts WHERE is_available = 1"
             ).fetchone()[0],
@@ -1242,6 +1297,16 @@ class SqliteRepositories:
         deleted: dict[str, int] = {}
         with self._connection:
             operations = (
+                (
+                    "completed_job_dead_letters",
+                    """
+                    UPDATE dead_letters
+                    SET resolved_at = CURRENT_TIMESTAMP
+                    WHERE resolved_at IS NULL
+                      AND job_id IN (SELECT id FROM jobs WHERE status = 'completed')
+                    """,
+                    None,
+                ),
                 (
                     "processed_updates",
                     "DELETE FROM processed_updates WHERE processed_at < datetime('now', ?)",
@@ -1279,7 +1344,7 @@ class SqliteRepositories:
                 ),
             )
             for name, sql, cutoff in operations:
-                cursor = self._connection.execute(sql, (cutoff,))
+                cursor = self._connection.execute(sql, () if cutoff is None else (cutoff,))
                 deleted[name] = cursor.rowcount
             self._connection.execute("PRAGMA optimize")
         return deleted

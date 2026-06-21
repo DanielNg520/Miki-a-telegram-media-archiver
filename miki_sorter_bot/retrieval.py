@@ -4,12 +4,13 @@ import csv
 import io
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from miki_sorter_bot.config import Settings
-from miki_sorter_bot.repositories import IndexedPostRecord, SqliteRepositories, TopicRecord
+from miki_sorter_bot.repositories import JobRecord, SqliteRepositories, TopicRecord
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +43,22 @@ class RetrievalSummary:
             f"Request {job_id} {state}: {self.matched} matched, "
             f"{self.copied} copied, {self.unavailable} unavailable, "
             f"{self.skipped} skipped, {self.failed} failed."
+        )
+
+
+@dataclass(slots=True)
+class RecoveredRequestMessage:
+    bot: Any
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+
+    async def reply_text(self, text: str) -> None:
+        await self.bot.send_message(
+            chat_id=self.chat_id,
+            message_thread_id=self.message_thread_id,
+            reply_to_message_id=self.message_id,
+            text=text,
         )
 
 
@@ -151,6 +168,10 @@ class RetrievalService:
             self._repositories.increment_metric("retrieval_duplicates", 1)
             await message.reply_text(f"Request {job.id} was already {job.status}.")
             return
+        if job.status == "running":
+            self._repositories.increment_metric("retrieval_duplicates", 1)
+            await message.reply_text(f"Request {job.id} is already running.")
+            return
         await message.reply_text(f"Request {job.id} queued.")
         coroutine = self._execute(job.id, request, topic, message, chat.id, context)
         application = getattr(context, "application", None)
@@ -200,14 +221,15 @@ class RetrievalService:
         job_id: int,
         request: RetrievalRequest,
         topic: TopicRecord,
-        request_message: object,
+        request_message: Any,
         destination_chat_id: int,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         job = self._repositories.get_job(job_id)
         if job is None or job.status == "cancelled":
             return
-        self._repositories.update_job(job_id, "running")
+        if not self._repositories.claim_job(job_id):
+            return
         posts = self._repositories.search_posts(
             self._settings.archive_chat_id,
             topic.thread_id,
@@ -241,7 +263,8 @@ class RetrievalService:
                         from_chat_id=post.source_chat_id,
                         message_id=post.source_message_id,
                         message_thread_id=request_message.message_thread_id,
-                    )
+                    ),
+                    retry_unknown_outcome=False,
                 )
             except Exception as error:
                 failure = classify_error(error)
@@ -254,15 +277,30 @@ class RetrievalService:
                     )
                     summary.unavailable += 1
                 else:
-                    self._repositories.update_retrieval_item(item.id, "failed", error=str(error))
+                    category = "outcome_unknown" if failure.outcome_unknown else failure.category
+                    item_error = (
+                        "delivery outcome unknown after timeout"
+                        if failure.outcome_unknown
+                        else str(error)
+                    )
+                    self._repositories.update_retrieval_item(
+                        item.id,
+                        "failed",
+                        error=item_error,
+                    )
                     summary.failed += 1
                     self._repositories.add_dead_letter(
                         job_id,
                         "retrieve_copy",
                         {"post_id": post.id, "request": job.payload},
-                        failure.category,
+                        category,
                         str(error),
                     )
+                    if failure.outcome_unknown:
+                        self._repositories.increment_metric(
+                            "telegram_delivery_outcome_unknown",
+                            1,
+                        )
                 LOGGER.warning(
                     "Retrieval copy failed",
                     extra={"job_id": job_id, "post_id": post.id},
@@ -301,6 +339,52 @@ class RetrievalService:
             },
         )
         await request_message.reply_text(summary.text(job_id))
+
+    async def resume_job(
+        self,
+        job_id: int,
+        context: Any,
+    ) -> bool:
+        job = self._repositories.get_job(job_id)
+        if job is None or job.kind != "retrieve" or job.status not in {"pending", "failed"}:
+            return False
+        request, topic, message, destination_chat_id = self._recovery_request(job, context.bot)
+        await self._execute(job.id, request, topic, message, destination_chat_id, context)
+        recovered = self._repositories.get_job(job_id)
+        return recovered is not None and recovered.status == "completed"
+
+    def _recovery_request(
+        self,
+        job: JobRecord,
+        bot: Any,
+    ) -> tuple[RetrievalRequest, TopicRecord, RecoveredRequestMessage, int]:
+        try:
+            destination_chat_id = int(job.payload["request_chat_id"])
+            destination_thread_id = int(job.payload["request_thread_id"])
+            request_message_id = int(job.payload["request_message_id"])
+            source_thread_id = int(job.payload["source_thread_id"])
+            keywords = tuple(str(value) for value in job.payload["keywords"])
+            match_mode = str(job.payload["match"])
+            limit = int(job.payload["limit"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"retrieval job {job.id} has an invalid recovery payload") from error
+        if (
+            not keywords
+            or match_mode not in {"all", "any"}
+            or not 1 <= limit <= self._settings.max_request_limit
+        ):
+            raise ValueError(f"retrieval job {job.id} has invalid recovery parameters")
+        topic = self._repositories.get(self._settings.archive_chat_id, source_thread_id)
+        if topic is None or not topic.is_active:
+            raise ValueError(f"retrieval job {job.id} targets an inactive source topic")
+        request = RetrievalRequest(str(source_thread_id), keywords, match_mode, limit)
+        message = RecoveredRequestMessage(
+            bot,
+            destination_chat_id,
+            destination_thread_id,
+            request_message_id,
+        )
+        return request, topic, message, destination_chat_id
 
     def _resolve_topic(self, reference: str) -> TopicRecord:
         topics = self._repositories.list_topics(self._settings.archive_chat_id)

@@ -109,9 +109,7 @@ def test_large_retrieval_is_bounded_by_requested_limit(database_connection) -> N
         effective_chat=SimpleNamespace(id=-200),
         effective_user=SimpleNamespace(id=10, is_bot=False),
     )
-    bot = SimpleNamespace(
-        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=900))
-    )
+    bot = SimpleNamespace(copy_message=AsyncMock(return_value=SimpleNamespace(message_id=900)))
 
     asyncio.run(
         RetrievalService(settings, repositories).handle_update(
@@ -181,9 +179,7 @@ def test_integration_malformed_payloads_return_stable_errors(
 ) -> None:
     repositories = SqliteRepositories(database_connection)
     settings = SimpleNamespace(
-        integration_clients=(
-            IntegrationClient("phase-ten", SECRET, frozenset({"submit"}), 20),
-        ),
+        integration_clients=(IntegrationClient("phase-ten", SECRET, frozenset({"submit"}), 20),),
         integration_signature_ttl=300,
         archive_chat_id=-200,
         default_request_limit=20,

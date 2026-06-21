@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -17,9 +18,7 @@ async def show_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     settings = context.bot_data.get("settings")
-    if settings is not None and (
-        user is None or user.id not in settings.admin_user_ids
-    ):
+    if settings is not None and (user is None or user.id not in settings.admin_user_ids):
         await message.reply_text("You are not authorized to inspect Miki's Telegram IDs.")
         return
 
@@ -69,7 +68,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    load_dotenv()
+    # Console-script entry points execute from the installed package, so
+    # python-dotenv's implicit stack-based search may miss the caller's .env.
+    # The listener is intentionally launched from the project directory.
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
     args = parse_args()
     token = args.token or os.getenv("BOT_TOKEN")
 

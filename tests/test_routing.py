@@ -16,12 +16,14 @@ class RoutingTests(unittest.TestCase):
             {"new", "cr", "item", "fc-2", "and", "日本"},
         )
 
-    def test_candidates_match_inside_tokens_and_limit_to_configured_keywords(self) -> None:
+    def test_candidates_require_non_alphanumeric_boundaries(self) -> None:
         self.assertEqual(
             route_candidates("CR and FC are present; CROWN is not CR.", ROUTES),
             {"cr", "fc"},
         )
-        self.assertEqual(route_candidates("CROWN only", ROUTES), {"cr"})
+        self.assertEqual(route_candidates("CROWN only", ROUTES), set())
+        self.assertEqual(route_candidates("(CR)-only", ROUTES), {"cr"})
+        self.assertEqual(route_candidates("C R only", ROUTES), set())
 
     def test_choose_route_uses_configuration_order(self) -> None:
         decision = choose_route({"fc", "gona"}, ROUTES)

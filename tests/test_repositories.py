@@ -26,6 +26,21 @@ def test_job_enqueue_returns_existing_job_for_same_key(database_connection) -> N
     assert second.payload == {"message_id": 42}
 
 
+def test_job_claim_is_atomic_and_tracks_attempts(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    job = repositories.enqueue("sort", "sort:claim", {})
+
+    assert repositories.claim_job(job.id) is True
+    assert repositories.claim_job(job.id) is False
+    claimed = repositories.get_job(job.id)
+    assert claimed.status == "running"
+    assert claimed.attempts == 1
+
+    repositories.update_job(job.id, "failed", error="retry me")
+    assert repositories.claim_job(job.id) is True
+    assert repositories.get_job(job.id).attempts == 2
+
+
 def test_delivery_lineage_is_idempotent(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     job = repositories.enqueue("sort", "sort:1", {"message_id": 42})
@@ -69,6 +84,10 @@ def test_interrupted_jobs_and_dead_letters_can_be_recovered(database_connection)
     repositories.update_job(job.id, "failed")
     assert repositories.retry_dead_letter(dead_id)
     assert repositories.get_job(job.id).status == "pending"
+    repositories.add_dead_letter(job.id, "retrieve_copy", {}, "transient", "again")
+
+    repositories.update_job(job.id, "completed")
+    assert repositories.list_dead_letters() == []
 
 
 def test_recovery_reports_interrupted_jobs_by_kind(database_connection) -> None:
@@ -163,16 +182,22 @@ def test_counts_recent_source_posts(database_connection) -> None:
     )
     indexer.index(message, -100)
 
-    assert repositories.count_recent_source_posts(
-        -100,
-        7,
-        datetime(2026, 6, 14, tzinfo=UTC).isoformat(),
-    ) == 1
-    assert repositories.count_recent_source_posts(
-        -100,
-        7,
-        datetime(2026, 6, 16, tzinfo=UTC).isoformat(),
-    ) == 0
+    assert (
+        repositories.count_recent_source_posts(
+            -100,
+            7,
+            datetime(2026, 6, 14, tzinfo=UTC).isoformat(),
+        )
+        == 1
+    )
+    assert (
+        repositories.count_recent_source_posts(
+            -100,
+            7,
+            datetime(2026, 6, 16, tzinfo=UTC).isoformat(),
+        )
+        == 0
+    )
 
 
 def test_replace_mapping_moves_it_between_topics(database_connection) -> None:

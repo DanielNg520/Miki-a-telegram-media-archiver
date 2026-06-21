@@ -64,11 +64,27 @@ def test_extractor_retains_compact_identifiers_and_configured_values() -> None:
     assert result.version == EXTRACTOR_VERSION
 
 
-def test_configured_keyword_matches_inside_compact_identifier() -> None:
-    result = extract_search_tokens("New COD123 release", {("keyword", "cod")})
+def test_configured_keyword_requires_non_alphanumeric_boundaries() -> None:
+    joined = extract_search_tokens("New COD123 release", {("keyword", "cod")})
+    punctuated = extract_search_tokens("New (COD)-release", {("keyword", "cod")})
 
+    assert ("keyword", "cod") not in {
+        (token.kind, token.normalized_value) for token in joined.tokens
+    }
     assert ("keyword", "cod") in {
-        (token.kind, token.normalized_value) for token in result.tokens
+        (token.kind, token.normalized_value) for token in punctuated.tokens
+    }
+
+
+def test_configured_phrase_requires_whitespace_between_words() -> None:
+    spaced = extract_search_tokens("Visit New York", {("phrase", "new york")})
+    punctuated = extract_search_tokens("Visit New, York", {("phrase", "new york")})
+
+    assert ("phrase", "new york") in {
+        (token.kind, token.normalized_value) for token in spaced.tokens
+    }
+    assert ("phrase", "new york") not in {
+        (token.kind, token.normalized_value) for token in punctuated.tokens
     }
 
 
@@ -187,8 +203,6 @@ def test_reindex_processes_only_bounded_outdated_rows(database_connection) -> No
     assert last_id is not None
     versions = [
         row["extractor_version"]
-        for row in database_connection.execute(
-            "SELECT extractor_version FROM posts ORDER BY id"
-        )
+        for row in database_connection.execute("SELECT extractor_version FROM posts ORDER BY id")
     ]
     assert versions == [EXTRACTOR_VERSION, 0]

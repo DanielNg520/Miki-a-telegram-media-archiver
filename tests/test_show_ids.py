@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import asyncio
 
+import miki_sorter_bot.show_ids as show_ids_module
 from miki_sorter_bot.show_ids import format_update_ids, show_ids
 
 
@@ -56,3 +57,31 @@ def test_show_ids_replies_to_admin() -> None:
 
     reply = update.effective_message.reply_text.await_args.args[0]
     assert "topic_id: 1234" in reply
+
+
+def test_main_loads_dotenv_from_current_directory(monkeypatch, tmp_path) -> None:
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("BOT_TOKEN=test-token\n", encoding="utf-8")
+    loaded_paths = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    monkeypatch.setattr(
+        show_ids_module,
+        "load_dotenv",
+        lambda *, dotenv_path: loaded_paths.append(dotenv_path),
+    )
+    monkeypatch.setattr(show_ids_module, "parse_args", lambda: SimpleNamespace(token="test-token"))
+
+    application = SimpleNamespace(
+        add_handler=lambda handler: None,
+        run_polling=lambda **kwargs: None,
+    )
+    builder = SimpleNamespace(
+        token=lambda token: SimpleNamespace(build=lambda: application),
+    )
+    monkeypatch.setattr(show_ids_module.Application, "builder", lambda: builder)
+
+    show_ids_module.main()
+
+    assert loaded_paths == [dotenv_path]

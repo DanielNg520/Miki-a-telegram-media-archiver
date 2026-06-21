@@ -41,6 +41,16 @@ class Storage:
         self.verify_database(destination)
         return destination
 
+    def operational_status(self) -> dict[str, object]:
+        """Read health state through an isolated connection safe for probe threads."""
+
+        uri = self._database_path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            return SqliteRepositories(connection).operational_status()
+
     @staticmethod
     def verify_database(path: Path) -> None:
         if not path.is_file():

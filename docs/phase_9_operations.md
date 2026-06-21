@@ -21,6 +21,10 @@ AUDIT_RETENTION_DAYS=90
 Metrics are stored as compact integer counters. Queue depth and database counts are
 calculated from the source tables, avoiding duplicated operational data.
 
+The HTTP health worker opens an isolated read-only SQLite connection for each probe. This keeps
+threaded `/healthz` and `/metrics` requests away from the event-loop delivery connection; provider
+failures return a bounded HTTP 503 response instead of dropping the probe connection.
+
 ## Restore Drill
 
 Stop Miki before restoring. Verify the selected backup, restore it to a temporary

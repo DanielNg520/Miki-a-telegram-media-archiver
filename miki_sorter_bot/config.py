@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, time
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -21,13 +21,23 @@ class IntegrationClient:
     requests_per_minute: int
 
 
+@dataclass(frozen=True, slots=True)
+class TopicForwardingPair:
+    source_thread_id: int
+    destination_thread_id: int
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     bot_token: str = Field(min_length=1, alias="BOT_TOKEN")
     source_chat_id: int = Field(alias="SOURCE_CHAT_ID")
-    source_thread_id: int = Field(alias="SOURCE_THREAD_ID")
+    source_thread_id: int = Field(gt=0, alias="SOURCE_THREAD_ID")
     archive_chat_id: int = Field(alias="ARCHIVE_CHAT_ID")
+    topic_forwarding_pairs: tuple[TopicForwardingPair, ...] = Field(
+        default_factory=tuple,
+        alias="TOPIC_FORWARDING_JSON",
+    )
     request_chat_id: int | None = Field(default=None, alias="REQUEST_CHAT_ID")
     collector_url: str = Field(default="http://127.0.0.1:8787", alias="COLLECTOR_URL")
     collector_api_key: str = Field(default="", alias="COLLECTOR_API_KEY")
@@ -87,6 +97,17 @@ class Settings(BaseSettings):
         gt=0,
         alias="TELEGRAM_MESSAGES_PER_SECOND",
     )
+    job_recovery_interval_seconds: int = Field(
+        default=60,
+        ge=10,
+        alias="JOB_RECOVERY_INTERVAL_SECONDS",
+    )
+    job_recovery_batch_size: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        alias="JOB_RECOVERY_BATCH_SIZE",
+    )
     telegram_startup_checkin_enabled: bool = Field(
         default=False,
         alias="TELEGRAM_STARTUP_CHECKIN_ENABLED",
@@ -131,9 +152,13 @@ class Settings(BaseSettings):
         default=False,
         alias="SOURCE_ACTIVITY_CHECK_ENABLED",
     )
-    source_activity_window_hours: int = Field(default=24, ge=1, alias="SOURCE_ACTIVITY_WINDOW_HOURS")
+    source_activity_window_hours: int = Field(
+        default=24, ge=1, alias="SOURCE_ACTIVITY_WINDOW_HOURS"
+    )
     error_reporting_dsn: str = Field(default="", alias="ERROR_REPORTING_DSN")
-    error_reporting_environment: str = Field(default="production", alias="ERROR_REPORTING_ENVIRONMENT")
+    error_reporting_environment: str = Field(
+        default="production", alias="ERROR_REPORTING_ENVIRONMENT"
+    )
     database_backend: str = Field(default="sqlite", alias="DATABASE_BACKEND")
     backup_daily_enabled: bool = Field(default=True, alias="BACKUP_DAILY_ENABLED")
     backup_time: str = Field(default="03:00", alias="BACKUP_TIME")
@@ -154,7 +179,9 @@ class Settings(BaseSettings):
     def parse_integration_clients(cls, value: object) -> object:
         if value in (None, ""):
             return ()
-        payload = json.loads(value) if isinstance(value, str) else value
+        payload: Any = json.loads(value) if isinstance(value, str) else value
+        if not isinstance(payload, (list, tuple)):
+            raise ValueError("INTEGRATION_CLIENTS_JSON must be an array")
         return tuple(
             IntegrationClient(
                 client_id=str(item["client_id"]).strip(),
@@ -164,6 +191,30 @@ class Settings(BaseSettings):
             )
             for item in payload
         )
+
+    @field_validator("topic_forwarding_pairs", mode="before")
+    @classmethod
+    def parse_topic_forwarding_pairs(cls, value: object) -> object:
+        if value in (None, ""):
+            return ()
+        if isinstance(value, tuple):
+            return value
+        try:
+            payload: Any = json.loads(value) if isinstance(value, str) else value
+            if not isinstance(payload, list):
+                raise ValueError("must be a JSON array")
+            pairs = tuple(
+                TopicForwardingPair(
+                    source_thread_id=int(item["source_thread_id"]),
+                    destination_thread_id=int(item["destination_thread_id"]),
+                )
+                for item in payload
+            )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "TOPIC_FORWARDING_JSON must be an array of source/destination thread IDs"
+            ) from error
+        return pairs
 
     @field_validator(
         "admin_user_ids",
@@ -182,7 +233,7 @@ class Settings(BaseSettings):
 
     @field_validator("request_chat_id", mode="before")
     @classmethod
-    def parse_optional_request_chat_id(cls, value: object) -> object:
+    def parse_optional_integer(cls, value: object) -> object:
         if value in (None, ""):
             return None
         return value
@@ -280,6 +331,14 @@ class Settings(BaseSettings):
             raise ValueError("TELEGRAM_RETRY_BASE_DELAY must not exceed TELEGRAM_RETRY_MAX_DELAY")
         if self.run_mode == "webhook" and not self.webhook_url.strip():
             raise ValueError("WEBHOOK_URL is required when RUN_MODE=webhook")
+        forwarding_sources = [pair.source_thread_id for pair in self.topic_forwarding_pairs]
+        if any(
+            pair.source_thread_id <= 0 or pair.destination_thread_id <= 0
+            for pair in self.topic_forwarding_pairs
+        ):
+            raise ValueError("topic forwarding thread IDs must be positive")
+        if len(forwarding_sources) != len(set(forwarding_sources)):
+            raise ValueError("each forwarding source topic may appear only once")
         client_ids = [client.client_id for client in self.integration_clients]
         if len(client_ids) != len(set(client_ids)):
             raise ValueError("integration client IDs must be unique")
@@ -295,4 +354,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

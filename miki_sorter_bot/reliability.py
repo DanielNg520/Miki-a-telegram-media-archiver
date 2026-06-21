@@ -18,6 +18,7 @@ class Failure:
     retryable: bool
     unavailable_source: bool = False
     retry_after: float | None = None
+    outcome_unknown: bool = False
 
 
 def classify_error(error: Exception) -> Failure:
@@ -38,8 +39,12 @@ def classify_error(error: Exception) -> Failure:
                 "message_id_invalid",
             )
         )
-        return Failure("unavailable_source" if unavailable else "invalid_request", False, unavailable)
-    if isinstance(error, (TimedOut, NetworkError, TimeoutError, OSError)):
+        return Failure(
+            "unavailable_source" if unavailable else "invalid_request", False, unavailable
+        )
+    if isinstance(error, (TimedOut, TimeoutError)):
+        return Failure("transient", True, outcome_unknown=True)
+    if isinstance(error, (NetworkError, OSError)):
         return Failure("transient", True)
     return Failure("unexpected", False)
 
@@ -51,7 +56,10 @@ class RetryPolicy:
     max_delay: float = 8.0
 
     def delay(self, attempt: int) -> float:
-        return min(self.base_delay * (2**attempt), self.max_delay) * random.uniform(0.8, 1.2)
+        return min(self.base_delay * (2**attempt), self.max_delay) * random.uniform(  # nosec B311
+            0.8,
+            1.2,
+        )
 
 
 class RateLimiter:
@@ -85,7 +93,12 @@ class DeliveryExecutor:
         self._sleep = sleep
         self._metric = metric or (lambda _name, _amount: None)
 
-    async def run(self, operation: Callable[[], Awaitable[T]]) -> T:
+    async def run(
+        self,
+        operation: Callable[[], Awaitable[T]],
+        *,
+        retry_unknown_outcome: bool = True,
+    ) -> T:
         started_at = time.monotonic()
         last_error: Exception | None = None
         try:
@@ -100,7 +113,12 @@ class DeliveryExecutor:
                     last_error = error
                     if failure.category == "rate_limit":
                         self._metric("telegram_throttles", 1)
-                    if not failure.retryable or attempt + 1 >= self._retry_policy.attempts:
+                    if (
+                        not failure.retryable
+                        or failure.outcome_unknown
+                        and not retry_unknown_outcome
+                        or attempt + 1 >= self._retry_policy.attempts
+                    ):
                         self._metric("telegram_delivery_failures", 1)
                         raise
                     self._metric("telegram_retries", 1)

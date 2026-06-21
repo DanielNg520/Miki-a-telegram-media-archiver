@@ -162,9 +162,7 @@ def test_human_request_copies_results_and_reports_summary(database_connection) -
     repositories = SqliteRepositories(database_connection)
     _library(repositories)
     service = RetrievalService(_settings(), repositories)
-    update = _request_update(
-        "#request\ntopic: Japan\nkeywords: Tokyo\nmatch: any\nlimit: 10"
-    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nmatch: any\nlimit: 10")
     bot = SimpleNamespace(
         copy_message=AsyncMock(
             side_effect=[

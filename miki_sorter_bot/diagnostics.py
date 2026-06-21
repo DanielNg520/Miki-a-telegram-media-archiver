@@ -81,6 +81,7 @@ def _archive_checks(
 ) -> Iterable[DiagnosticCheck]:
     topics = repositories.list_topics(settings.archive_chat_id)
     mappings = repositories.list_mappings(settings.archive_chat_id)
+    forwarding_pairs = getattr(settings, "topic_forwarding_pairs", ())
     if not topics:
         yield DiagnosticCheck(
             "error",
@@ -94,17 +95,45 @@ def _archive_checks(
         "archive_topics",
         f"{len(topics)} active topic(s) registered for archive chat {settings.archive_chat_id}.",
     )
-    if not mappings:
+    registered_thread_ids = {topic.thread_id for topic in topics}
+    missing_forwarding_destinations = sorted(
+        {
+            pair.destination_thread_id
+            for pair in forwarding_pairs
+            if pair.destination_thread_id not in registered_thread_ids
+        }
+    )
+    if missing_forwarding_destinations:
+        yield DiagnosticCheck(
+            "error",
+            "direct_forwarding",
+            "Forwarding destination topic(s) are not registered or active: "
+            + ", ".join(str(thread_id) for thread_id in missing_forwarding_destinations),
+        )
+    elif forwarding_pairs:
+        yield DiagnosticCheck(
+            "ok",
+            "direct_forwarding",
+            f"{len(forwarding_pairs)} direct topic forwarding pair(s) configured.",
+        )
+    if not mappings and not forwarding_pairs:
         yield DiagnosticCheck(
             "error",
             "routes",
-            "No hashtag, keyword, or phrase routes configured. "
-            "Run /hashtag_add, /keyword_add, or /keyword_replace after registering topics.",
+            "No direct forwarding pairs or hashtag, keyword, or phrase routes configured. "
+            "Set TOPIC_FORWARDING_JSON or add a route after registering topics.",
         )
+        return
+    if not mappings:
         return
     yield DiagnosticCheck("ok", "routes", f"{len(mappings)} route mapping(s) configured.")
     mapped_topic_ids = {mapping.topic_id for mapping in mappings}
-    unmapped = [topic for topic in topics if topic.id not in mapped_topic_ids]
+    forwarding_thread_ids = {pair.destination_thread_id for pair in forwarding_pairs}
+    unmapped = [
+        topic
+        for topic in topics
+        if topic.id not in mapped_topic_ids and topic.thread_id not in forwarding_thread_ids
+    ]
     if unmapped:
         names = ", ".join(f"{topic.name} ({topic.thread_id})" for topic in unmapped[:5])
         suffix = "..." if len(unmapped) > 5 else ""
@@ -171,12 +200,13 @@ def _operational_checks(repositories: SqliteRepositories) -> Iterable[Diagnostic
             f"{unresolved} unresolved dead letter(s) need operator review.",
         )
     running = status["jobs"].get("running", 0)
+    pending = status["jobs"].get("pending", 0)
     failed = status["jobs"].get("failed", 0)
-    if running or failed:
+    if pending or running or failed:
         yield DiagnosticCheck(
             "warning",
             "jobs",
-            f"Job states need review: running={running}, failed={failed}.",
+            f"Job states need review: pending={pending}, running={running}, failed={failed}.",
         )
 
 

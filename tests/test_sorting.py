@@ -5,17 +5,23 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 
+from miki_sorter_bot.config import TopicForwardingPair
 from miki_sorter_bot.repositories import SqliteRepositories
 from miki_sorter_bot.sorting import RouteMatcher, SortingService
 
 
-def _settings(*, dry_run: bool = False) -> SimpleNamespace:
+def _settings(
+    *,
+    dry_run: bool = False,
+    forwarding_pairs: tuple[TopicForwardingPair, ...] = (),
+) -> SimpleNamespace:
     return SimpleNamespace(
         source_chat_id=-100,
         source_thread_id=5,
         archive_chat_id=-200,
+        topic_forwarding_pairs=forwarding_pairs,
         sort_dry_run=dry_run,
         send_confirmation=False,
     )
@@ -29,11 +35,12 @@ def _message(
     media: bool = True,
     media_group_id: str | None = None,
     media_kind: str = "photo",
+    thread_id: int | None = 5,
 ) -> SimpleNamespace:
     media_object = SimpleNamespace(file_id=f"file-{message_id}")
     return SimpleNamespace(
         message_id=message_id,
-        message_thread_id=5,
+        message_thread_id=thread_id,
         caption=caption,
         caption_entities=None,
         text=None,
@@ -60,21 +67,30 @@ def _routes(repositories: SqliteRepositories) -> None:
     repositories.add_mapping(-200, 9, "phrase", "New York", 1)
 
 
-def test_matcher_enforces_hashtag_precedence_and_keyword_substrings(database_connection) -> None:
+def test_matcher_enforces_hashtag_precedence_and_exact_keywords(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _routes(repositories)
     matcher = RouteMatcher(repositories, -200)
 
     hashtag = matcher.decide("ABC but explicitly #Japan")
-    substring = matcher.decide("ABCDEF only")
+    exact = matcher.decide("ABC only")
+    punctuated = matcher.decide("(ABC)-only")
+    joined = matcher.decide("ABCDEF only")
+    split = matcher.decide("A BC only")
     phrase = matcher.decide("Visit new york today")
+    punctuated_phrase = matcher.decide("Visit new, york today")
 
     assert hashtag.status == "matched"
     assert hashtag.topic.thread_id == 9
     assert hashtag.reason == "hashtag:japan"
-    assert substring.status == "matched"
-    assert substring.topic.thread_id == 10
+    assert exact.status == "matched"
+    assert exact.topic.thread_id == 10
+    assert punctuated.status == "matched"
+    assert punctuated.topic.thread_id == 10
+    assert joined.status == "unmatched"
+    assert split.status == "unmatched"
     assert phrase.topic.thread_id == 9
+    assert punctuated_phrase.status == "unmatched"
 
 
 def test_matcher_reports_cross_topic_conflict(database_connection) -> None:
@@ -111,7 +127,102 @@ def test_successful_sort_persists_before_copy_and_indexes_result(database_connec
     indexing.index_copy.assert_called_once()
 
 
-def test_keyword_inside_compact_identifier_is_sorted(database_connection) -> None:
+def test_direct_destination_forwards_captionless_document_without_routes(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    indexing = SimpleNamespace(index_copy=Mock(return_value=True))
+    service = SortingService(
+        _settings(forwarding_pairs=(TopicForwardingPair(5, 9),)),
+        repositories,
+        indexing,
+    )
+    message = _message("", media_kind="document")
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    )
+    update = SimpleNamespace(
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    bot.copy_message.assert_awaited_once()
+    assert bot.copy_message.await_args.kwargs["message_thread_id"] == 9
+    assert repositories.get_delivery(-100, 12, -200, 9).reason == "forwarding-pair:5->9"
+
+
+def test_multiple_source_topics_can_forward_to_one_destination(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Shared Inbox")
+    service = SortingService(
+        _settings(
+            forwarding_pairs=(
+                TopicForwardingPair(5, 9),
+                TopicForwardingPair(6, 9),
+            )
+        ),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(
+            side_effect=[SimpleNamespace(message_id=99), SimpleNamespace(message_id=100)]
+        ),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def forward_both() -> None:
+        await service.handle_update(
+            SimpleNamespace(effective_message=_message("", message_id=12), effective_chat=chat),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message("", message_id=13, thread_id=6),
+                effective_chat=chat,
+            ),
+            context,
+        )
+
+    asyncio.run(forward_both())
+
+    assert bot.copy_message.await_count == 2
+    assert {call.kwargs["message_thread_id"] for call in bot.copy_message.await_args_list} == {9}
+
+
+def test_multiple_hashtags_for_same_topic_forward_single_message_once(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    repositories.add_mapping(-200, 9, "hashtag", "Tokyo", 1)
+    repositories.add_mapping(-200, 9, "hashtag", "RX7", 1)
+    indexing = SimpleNamespace(index_copy=Mock(return_value=True))
+    service = SortingService(_settings(), repositories, indexing)
+    message = _message("#Japan #Tokyo #RX7")
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    )
+    update = SimpleNamespace(
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    delivery = repositories.get_delivery(-100, 12, -200, 9)
+    assert delivery.status == "sent"
+    bot.copy_message.assert_awaited_once()
+    indexing.index_copy.assert_called_once()
+    assert repositories.metrics_snapshot()["sort_deliveries"] == 1
+
+
+def test_keyword_inside_compact_identifier_is_not_sorted(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _routes(repositories)
     repositories.add_mapping(-200, 10, "keyword", "COD", 1)
@@ -132,8 +243,7 @@ def test_keyword_inside_compact_identifier_is_sorted(database_connection) -> Non
 
     asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
 
-    bot.copy_message.assert_awaited_once()
-    assert bot.copy_message.await_args.kwargs["message_thread_id"] == 10
+    bot.copy_message.assert_not_awaited()
 
 
 def test_hashtag_with_underscore_is_sorted(database_connection) -> None:
@@ -333,6 +443,82 @@ def test_album_members_reuse_the_caption_decision_and_preserve_order(
     assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
 
 
+def test_short_media_group_response_suppresses_unsafe_fallback(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        send_media_group=AsyncMock(return_value=[SimpleNamespace(message_id=90)]),
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=91)),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        for message_id, caption in ((12, "#Japan"), (13, "")):
+            await service.handle_update(
+                SimpleNamespace(
+                    effective_message=_message(
+                        caption,
+                        message_id=message_id,
+                        media_group_id="album-short-response",
+                    ),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_album())
+
+    bot.send_media_group.assert_awaited_once()
+    bot.copy_message.assert_not_awaited()
+    assert repositories.get_delivery(-100, 12, -200, 9).destination_message_id == 90
+    assert repositories.get_delivery(-100, 13, -200, 9).status == "failed"
+    assert repositories.list_dead_letters()[0]["error_category"] == "outcome_unknown"
+
+
+def test_shutdown_drains_routable_album_and_cancels_timers(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=90)),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    async def queue_and_shutdown() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message(
+                    "#Japan",
+                    media_group_id="album-shutdown",
+                ),
+                effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+            ),
+            context,
+        )
+        await service.shutdown(context)
+        assert service._album_flush_tasks == {}
+        assert service._pending_albums == {}
+
+    asyncio.run(queue_and_shutdown())
+
+    bot.copy_message.assert_awaited_once()
+
+
 def test_mixed_ten_item_photo_video_album_is_sent_as_one_group(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _routes(repositories)
@@ -379,9 +565,59 @@ def test_mixed_ten_item_photo_video_album_is_sent_as_one_group(database_connecti
     ]
     bot.copy_message.assert_not_awaited()
     assert [
-        repositories.get_delivery(-100, message_id, -200, 9).status
-        for message_id in range(12, 22)
+        repositories.get_delivery(-100, message_id, -200, 9).status for message_id in range(12, 22)
     ] == ["sent"] * 10
+
+
+def test_multiple_hashtags_for_same_topic_forward_ten_media_album_once(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    for value in ("男男", "去马赛克", "demosaiced", "AI字幕", "无码", "AI画质增强"):
+        repositories.add_mapping(-200, 9, "hashtag", value, 1)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(
+            return_value=[SimpleNamespace(message_id=message_id) for message_id in range(90, 100)]
+        ),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        for offset in range(10):
+            await service.handle_update(
+                SimpleNamespace(
+                    effective_message=_message(
+                        "#男男 #去马赛克 #demosaiced #AI字幕 #无码 #AI画质增强"
+                        if offset == 0
+                        else "",
+                        message_id=12 + offset,
+                        media_group_id="album-1",
+                        media_kind="video" if offset == 9 else "photo",
+                    ),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_album())
+
+    bot.send_media_group.assert_awaited_once()
+    bot.copy_message.assert_not_awaited()
+    assert [
+        repositories.get_delivery(-100, message_id, -200, 9).status for message_id in range(12, 22)
+    ] == ["sent"] * 10
+    assert repositories.metrics_snapshot()["sort_deliveries"] == 10
 
 
 @pytest.mark.parametrize("media_kind", ["audio", "document"])
@@ -437,8 +673,7 @@ def test_homogeneous_non_visual_album_is_sent_as_one_group(
     ]
     bot.copy_message.assert_not_awaited()
     assert [
-        repositories.get_delivery(-100, message_id, -200, 9).status
-        for message_id in range(12, 15)
+        repositories.get_delivery(-100, message_id, -200, 9).status for message_id in range(12, 15)
     ] == ["sent"] * 3
 
 
@@ -494,8 +729,7 @@ def test_unsupported_mixed_media_album_falls_back_and_forwards_every_member(
         15,
     ]
     assert [
-        repositories.get_delivery(-100, message_id, -200, 9).status
-        for message_id in range(12, 16)
+        repositories.get_delivery(-100, message_id, -200, 9).status for message_id in range(12, 16)
     ] == ["sent"] * 4
 
 
@@ -828,6 +1062,255 @@ def test_media_group_failure_falls_back_to_ordered_copy(database_connection) -> 
     assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
     assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
     assert repositories.metrics_snapshot()["media_group_fallbacks"] == 1
+
+
+def test_individual_album_fallback_continues_after_one_member_fails(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(
+            side_effect=[
+                BadRequest("member refused"),
+                SimpleNamespace(message_id=91),
+                SimpleNamespace(message_id=92),
+            ]
+        ),
+        send_media_group=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        for offset, media_kind in enumerate(("photo", "document", "photo")):
+            await service.handle_update(
+                SimpleNamespace(
+                    effective_message=_message(
+                        "#Japan" if offset == 0 else "",
+                        message_id=12 + offset,
+                        media_group_id="album-member-failure",
+                        media_kind=media_kind,
+                    ),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_album())
+
+    bot.send_media_group.assert_not_awaited()
+    assert [call.kwargs["message_id"] for call in bot.copy_message.await_args_list] == [12, 13, 14]
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "failed"
+    assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
+    assert repositories.get_delivery(-100, 14, -200, 9).status == "sent"
+    assert repositories.metrics_snapshot()["album_member_delivery_failures"] == 1
+
+
+def test_media_group_timeout_is_not_retried_or_fallen_back(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(side_effect=TimedOut("Timed out")),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        for offset in range(10):
+            await service.handle_update(
+                SimpleNamespace(
+                    effective_message=_message(
+                        "#Japan" if offset == 0 else "",
+                        message_id=12 + offset,
+                        media_group_id="album-timeout",
+                    ),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_album())
+
+    assert bot.send_media_group.await_count == 1
+    bot.copy_message.assert_not_awaited()
+    assert [
+        repositories.get_delivery(-100, message_id, -200, 9).status for message_id in range(12, 22)
+    ] == ["failed"] * 10
+    assert len(repositories.list_dead_letters()) == 10
+    assert repositories.metrics_snapshot()["telegram_delivery_outcome_unknown"] == 10
+
+
+def test_two_back_to_back_ten_item_albums_are_isolated_and_delivered_once(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    service = SortingService(
+        _settings(forwarding_pairs=(TopicForwardingPair(5, 9),)),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(
+            side_effect=[
+                [SimpleNamespace(message_id=100 + offset) for offset in range(10)],
+                [SimpleNamespace(message_id=200 + offset) for offset in range(10)],
+            ]
+        ),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_albums() -> None:
+        for album_number, start_id in enumerate((1000, 2000), start=1):
+            for offset in range(10):
+                await service.handle_update(
+                    SimpleNamespace(
+                        effective_message=_message(
+                            "#Japan #Tokyo #RX7" if offset == 0 else "",
+                            message_id=start_id + offset,
+                            media_group_id=f"album-{album_number}",
+                        ),
+                        effective_chat=chat,
+                    ),
+                    context,
+                )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_albums())
+
+    assert bot.send_media_group.await_count == 2
+    assert [len(call.kwargs["media"]) for call in bot.send_media_group.await_args_list] == [10, 10]
+    bot.copy_message.assert_not_awaited()
+    assert repositories.metrics_snapshot()["sort_deliveries"] == 20
+
+
+def test_direct_album_reuses_topic_when_later_members_omit_thread_id(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    service = SortingService(
+        _settings(forwarding_pairs=(TopicForwardingPair(5, 9),)),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(
+            return_value=[
+                SimpleNamespace(message_id=100),
+                SimpleNamespace(message_id=101),
+                SimpleNamespace(message_id=102),
+            ]
+        ),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_album() -> None:
+        for offset, thread_id in enumerate((5, None, None)):
+            await service.handle_update(
+                SimpleNamespace(
+                    update_id=500 + offset,
+                    effective_message=_message(
+                        "",
+                        message_id=1000 + offset,
+                        media_group_id="album-with-missing-thread-ids",
+                        thread_id=thread_id,
+                    ),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_album())
+
+    bot.send_media_group.assert_awaited_once()
+    assert len(bot.send_media_group.await_args.kwargs["media"]) == 3
+    assert repositories.metrics_snapshot()["sort_deliveries"] == 3
+
+
+def test_twenty_photos_and_pdf_split_across_telegram_groups_all_forward(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    service = SortingService(
+        _settings(forwarding_pairs=(TopicForwardingPair(5, 9),)),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=300)),
+        send_media_group=AsyncMock(
+            side_effect=[
+                [SimpleNamespace(message_id=100 + offset) for offset in range(10)],
+                [SimpleNamespace(message_id=200 + offset) for offset in range(10)],
+            ]
+        ),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run_submission() -> None:
+        for album_number, start_id in enumerate((1000, 1010), start=1):
+            for offset in range(10):
+                await service.handle_update(
+                    SimpleNamespace(
+                        update_id=start_id + offset,
+                        effective_message=_message(
+                            "",
+                            message_id=start_id + offset,
+                            media_group_id=f"album-{album_number}",
+                        ),
+                        effective_chat=chat,
+                    ),
+                    context,
+                )
+        await service.handle_update(
+            SimpleNamespace(
+                update_id=1020,
+                effective_message=_message(
+                    "",
+                    message_id=1020,
+                    media_kind="document",
+                ),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run_submission())
+
+    assert bot.send_media_group.await_count == 2
+    assert [len(call.kwargs["media"]) for call in bot.send_media_group.await_args_list] == [10, 10]
+    bot.copy_message.assert_awaited_once()
+    assert bot.copy_message.await_args.kwargs["message_id"] == 1020
+    assert repositories.metrics_snapshot()["sort_deliveries"] == 21
 
 
 def test_partially_delivered_album_retry_does_not_resend_completed_members(

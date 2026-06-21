@@ -68,6 +68,10 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await client.lookup({"CR"}), {"cr"})
 
+    async def test_client_rejects_non_http_collector_urls(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HTTP or HTTPS"):
+            CollectorClient("file:///tmp/collector", "key", "gvdb", 1.0)
+
 
 class RealCollectorContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_bot_client_matches_real_collector_api_contract(self) -> None:

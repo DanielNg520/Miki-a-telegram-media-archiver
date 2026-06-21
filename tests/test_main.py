@@ -7,6 +7,7 @@ from telegram.error import NetworkError
 from miki_sorter_bot.main import (
     _handle_error,
     _non_ok_summary,
+    _schedule_job_recovery,
     _schedule_sanity_checks,
     _send_startup_checkin,
     _run_application,
@@ -186,3 +187,19 @@ def test_sanity_checks_are_scheduled_when_enabled() -> None:
 
     job_queue.run_repeating.assert_called_once()
     assert job_queue.run_repeating.call_args.kwargs["interval"] == 900
+
+
+def test_job_recovery_worker_is_scheduled() -> None:
+    job_queue = SimpleNamespace(run_repeating=Mock())
+    application = SimpleNamespace(job_queue=job_queue)
+    recovery = SimpleNamespace(run_once=AsyncMock())
+    settings = SimpleNamespace(job_recovery_interval_seconds=45)
+
+    _schedule_job_recovery(application, settings, recovery)
+
+    job_queue.run_repeating.assert_called_once()
+    assert job_queue.run_repeating.call_args.kwargs == {
+        "interval": 45,
+        "first": 45,
+        "name": "job-recovery",
+    }

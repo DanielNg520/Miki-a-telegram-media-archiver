@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from miki_sorter_bot.config import TopicForwardingPair
 from miki_sorter_bot.diagnostics import run_diagnostics
 from miki_sorter_bot.repositories import SqliteRepositories
 
@@ -19,6 +20,7 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "request_topic_ids": frozenset(),
         "source_activity_check_enabled": False,
         "source_activity_window_hours": 24,
+        "topic_forwarding_pairs": (),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -43,6 +45,27 @@ def test_diagnostics_accepts_registered_routes(database_connection) -> None:
     assert not report.has_errors
     assert "1 active topic" in report.format()
     assert "1 route mapping" in report.format()
+
+
+def test_diagnostics_accepts_registered_direct_forwarding_without_keyword_routes(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Shared Inbox")
+
+    report = run_diagnostics(
+        _settings(
+            request_topic_ids=frozenset({50}),
+            topic_forwarding_pairs=(
+                TopicForwardingPair(5, 9),
+                TopicForwardingPair(6, 9),
+            ),
+        ),
+        repositories,
+    )
+
+    assert not report.has_errors
+    assert "2 direct topic forwarding pair(s)" in report.format()
 
 
 def test_diagnostics_warns_on_webhook_path_mismatch(database_connection) -> None:

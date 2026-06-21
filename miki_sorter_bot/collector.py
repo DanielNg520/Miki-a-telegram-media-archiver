@@ -27,7 +27,7 @@ class RetryPolicy:
             raise ValueError("retry delays must be non-negative and ordered")
 
     def delay(self, attempt: int) -> float:
-        return min(self.base_delay * (2**attempt), self.max_delay) * random.uniform(
+        return min(self.base_delay * (2**attempt), self.max_delay) * random.uniform(  # nosec B311
             0.8,
             1.2,
         )
@@ -43,7 +43,11 @@ class CollectorClient:
         *,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        normalized_url = base_url.rstrip("/")
+        parsed_url = urllib.parse.urlparse(normalized_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError("collector URL must use HTTP or HTTPS and include a host")
+        self._base_url = normalized_url
         self._api_key = api_key
         self._database = database
         self._timeout = timeout
@@ -83,7 +87,8 @@ class CollectorClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            # The constructor restricts the base URL to HTTP(S) with a host.
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # nosec B310
                 if response.headers.get_content_type() != "application/json":
                     raise CollectorError("collector returned a non-JSON response")
                 payload = json.load(response)

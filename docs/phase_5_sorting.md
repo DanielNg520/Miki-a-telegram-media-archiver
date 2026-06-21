@@ -8,10 +8,12 @@ mappings from Phase 3.
 Miki sorts only messages that:
 
 - Arrive in `SOURCE_CHAT_ID`
-- Arrive in `SOURCE_THREAD_ID`
+- Arrive in `SOURCE_THREAD_ID` for rule-based routing, or in a source topic listed in
+  `TOPIC_FORWARDING_JSON`
 - Belong to a group or supergroup
 - Contain supported media
-- Include a caption/text, or belong to an album whose first member already established a decision
+- Include a caption/text or established album decision when using rule-based routing; direct
+  forwarding pairs do not require either
 - Were not authored by Miki itself
 
 Messages from other bots remain eligible so Miki can cooperate with approved programs. Miki's own
@@ -19,9 +21,17 @@ messages are rejected at the input boundary to prevent loops.
 
 ## Routing
 
+Direct source-topic → archive-topic pairs take priority over text routing. Each source topic may
+have one destination, while multiple source topics may share the same destination. All supported
+attachments in these topics are delivered without inspecting captions, hashtags, keywords, or
+phrases. Destinations must be active registered topics in `ARCHIVE_CHAT_ID`.
+
+Messages in the legacy `SOURCE_THREAD_ID` that have no direct pair continue through the matching
+rules below.
+
 Matching is Unicode-aware and case-insensitive:
 
-- Hashtags require exact tokens; keywords may match within an individual token.
+- Hashtags require exact tokens; keywords require non-alphanumeric boundaries.
 - Phrases require exact consecutive normalized tokens.
 - Hashtags have priority over keywords and phrases.
 - Several rules targeting one topic collapse into one route.

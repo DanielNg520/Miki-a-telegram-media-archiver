@@ -28,10 +28,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.default_request_limit, 20)
         self.assertEqual(settings.max_request_limit, 100)
         self.assertFalse(settings.sort_dry_run)
+        self.assertEqual(settings.topic_forwarding_pairs, ())
         self.assertEqual(settings.album_flush_delay_seconds, 5.0)
         self.assertEqual(settings.album_max_wait_seconds, 30.0)
         self.assertEqual(settings.requester_bot_ids, frozenset())
         self.assertEqual(settings.telegram_retry_attempts, 3)
+        self.assertEqual(settings.job_recovery_interval_seconds, 60)
+        self.assertEqual(settings.job_recovery_batch_size, 100)
         self.assertEqual(settings.telegram_bootstrap_retries, -1)
         self.assertFalse(settings.telegram_drop_pending_updates)
         self.assertFalse(settings.telegram_startup_checkin_enabled)
@@ -98,6 +101,43 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.effective_request_chat_id, -300)
 
+    def test_direct_forwarding_supports_pairs_and_many_to_one(self) -> None:
+        values = _values()
+        values["TOPIC_FORWARDING_JSON"] = (
+            '[{"source_thread_id":5,"destination_thread_id":9},'
+            '{"source_thread_id":6,"destination_thread_id":9}]'
+        )
+        pairs = Settings(**values).topic_forwarding_pairs
+
+        self.assertEqual(
+            [(pair.source_thread_id, pair.destination_thread_id) for pair in pairs],
+            [(5, 9), (6, 9)],
+        )
+
+    def test_direct_forwarding_rejects_duplicate_sources(self) -> None:
+        values = _values()
+        values["TOPIC_FORWARDING_JSON"] = (
+            '[{"source_thread_id":5,"destination_thread_id":9},'
+            '{"source_thread_id":5,"destination_thread_id":10}]'
+        )
+
+        with self.assertRaisesRegex(ValidationError, "source topic may appear only once"):
+            Settings(**values)
+
+    def test_direct_forwarding_rejects_malformed_payload(self) -> None:
+        values = _values()
+        values["TOPIC_FORWARDING_JSON"] = '{"source_thread_id":5}'
+
+        with self.assertRaisesRegex(ValidationError, "TOPIC_FORWARDING_JSON"):
+            Settings(**values)
+
+    def test_source_topic_must_be_positive(self) -> None:
+        values = _values()
+        values["SOURCE_THREAD_ID"] = 0
+
+        with self.assertRaises(ValidationError):
+            Settings(**values)
+
     def test_rejects_request_default_above_maximum(self) -> None:
         values = _values()
         values["DEFAULT_REQUEST_LIMIT"] = 101
@@ -123,7 +163,6 @@ class SettingsTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValidationError, "16"):
             Settings(**values)
-
 
     def test_backup_time_normalizes_and_exposes_utc_time(self) -> None:
         values = _values()

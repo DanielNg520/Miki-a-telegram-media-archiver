@@ -18,11 +18,19 @@ dependencies = [
 monitoring = [
     "sentry-sdk>=2.0.0",
 ]
+dev = [
+    "bandit>=1.9.0",
+    "mypy>=1.15.0",
+    "pip-audit>=2.9.0",
+    "pytest>=8.0.0",
+    "ruff>=0.11.0",
+]
 
 [project.scripts]
 miki-sorter = "miki_sorter_bot.main:main"
 miki-show-ids = "miki_sorter_bot.show_ids:main"
 miki-doctor = "miki_sorter_bot.diagnostics:main"
+miki-ops = "miki_sorter_bot.ops:main"
 
 [tool.setuptools.packages.find]
 include = ["miki_sorter_bot*"]

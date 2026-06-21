@@ -16,6 +16,15 @@ def test_operations_metrics_maintenance_backup_and_restore(tmp_path) -> None:
     storage = Storage(database_path)
     repositories = storage.open()
     repositories.increment_metric("duplicates", 2)
+    completed_job = repositories.enqueue("sort", "sort:completed", {})
+    repositories.update_job(completed_job.id, "completed")
+    repositories.add_dead_letter(
+        completed_job.id,
+        "sort_copy",
+        {},
+        "transient",
+        "legacy residue",
+    )
     operations = OperationsService(
         repositories,
         storage,
@@ -33,12 +42,15 @@ def test_operations_metrics_maintenance_backup_and_restore(tmp_path) -> None:
     assert report.healthy
     assert report.details["metrics"]["duplicates"] == 2
     assert set(deleted) == {
+        "completed_job_dead_letters",
         "processed_updates",
         "resolved_dead_letters",
         "integration_nonces",
         "integration_usage",
         "audit_events",
     }
+    assert deleted["completed_job_dead_letters"] == 1
+    assert repositories.list_dead_letters() == []
     Storage.verify_database(restored)
     storage.close()
 

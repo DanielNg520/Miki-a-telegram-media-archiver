@@ -44,9 +44,7 @@ def test_admin_registers_current_live_forum_topic(database_connection) -> None:
         bot=SimpleNamespace(
             get_chat=AsyncMock(return_value=SimpleNamespace(is_forum=True)),
             get_me=AsyncMock(return_value=SimpleNamespace(id=50)),
-            get_chat_member=AsyncMock(
-                return_value=SimpleNamespace(status="administrator")
-            ),
+            get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")),
         )
     )
 
@@ -86,9 +84,84 @@ def test_delegated_manager_can_add_phrase_mapping(database_connection) -> None:
     asyncio.run(commands.keyword_add(update, SimpleNamespace()))
 
     mappings = repositories.list_mappings(-100, thread_id=7)
+    assert [(item.kind, item.normalized_value) for item in mappings] == [("phrase", "new york")]
+
+
+def test_manager_can_add_multiple_keyword_and_phrase_mappings(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-100, 7, "Japan")
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update('/keyword_add 7 Tokyo, RX7, "New York"')
+
+    asyncio.run(commands.keyword_add(update, SimpleNamespace()))
+
+    mappings = repositories.list_mappings(-100, thread_id=7)
     assert [(item.kind, item.normalized_value) for item in mappings] == [
-        ("phrase", "new york")
+        ("keyword", "rx7"),
+        ("keyword", "tokyo"),
+        ("phrase", "new york"),
     ]
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "Added 3 route(s)" in reply
+
+
+def test_manager_can_add_multiple_hashtags_with_optional_prefix(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-100, 7, "Japan")
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/hashtag_add 7 #japan, tokyo, #rx7")
+
+    asyncio.run(commands.hashtag_add(update, SimpleNamespace()))
+
+    mappings = repositories.list_mappings(-100, thread_id=7)
+    assert [(item.kind, item.normalized_value) for item in mappings] == [
+        ("hashtag", "japan"),
+        ("hashtag", "rx7"),
+        ("hashtag", "tokyo"),
+    ]
+
+
+def test_manager_can_add_space_separated_unicode_hashtags(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-100, 46, "Japan")
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update(
+        "/hashtag_add 46 #日本 #男男  #去马赛克 #demosaiced #AI字幕  #无码 #AI画质增强"
+    )
+
+    asyncio.run(commands.hashtag_add(update, SimpleNamespace()))
+
+    mappings = repositories.list_mappings(-100, thread_id=46)
+    assert [item.normalized_value for item in mappings] == [
+        "ai字幕",
+        "ai画质增强",
+        "demosaiced",
+        "去马赛克",
+        "无码",
+        "日本",
+        "男男",
+    ]
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "Added 7 route(s)" in reply
+    assert "Skipped" not in reply
+
+
+def test_bulk_add_reports_invalid_values_without_blocking_valid_ones(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-100, 7, "Japan")
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/hashtag_add 7 japan, bad tag, tokyo")
+
+    asyncio.run(commands.hashtag_add(update, SimpleNamespace()))
+
+    mappings = repositories.list_mappings(-100, thread_id=7)
+    assert [item.normalized_value for item in mappings] == ["japan", "tokyo"]
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "Added 2 route(s)" in reply
+    assert "Skipped" in reply
+    assert "bad tag" in reply
 
 
 def test_manager_grant_is_universal_and_can_delegate(database_connection) -> None:
@@ -143,6 +216,28 @@ def test_admin_can_view_audit_log(database_connection) -> None:
     asyncio.run(commands.audit_log(update, SimpleNamespace()))
 
     assert "test.event" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_dead_letter_retry_immediately_invokes_recovery_worker(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    job = repositories.enqueue("sort", "sort:retry", {})
+    repositories.update_job(job.id, "failed", error="boom")
+    dead_letter_id = repositories.add_dead_letter(
+        job.id,
+        "sort_copy",
+        {},
+        "unexpected",
+        "boom",
+    )
+    recovery = SimpleNamespace(resume_job=AsyncMock(return_value=True))
+    commands = ManagementCommands(_settings(10), repositories, recovery=recovery)
+    update = _update(f"/dead_letter_retry {dead_letter_id}")
+    context = SimpleNamespace()
+
+    asyncio.run(commands.dead_letter_retry(update, context))
+
+    recovery.resume_job.assert_awaited_once_with(job.id, context)
+    assert "requeued" in update.effective_message.reply_text.await_args.args[0]
 
 
 def test_admin_can_run_human_readable_doctor(database_connection) -> None:

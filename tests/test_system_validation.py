@@ -76,9 +76,7 @@ def test_fresh_database_sort_index_retrieve_restart_and_backup(tmp_path) -> None
     )
     retrieval = RetrievalService(settings, repositories)
 
-    asyncio.run(
-        retrieval.handle_update(request_update, SimpleNamespace(bot=retrieval_bot))
-    )
+    asyncio.run(retrieval.handle_update(request_update, SimpleNamespace(bot=retrieval_bot)))
 
     assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
     assert retrieval_bot.copy_message.await_count == 1

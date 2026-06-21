@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 from pydantic import ValidationError
 from telegram import Update
@@ -20,6 +21,7 @@ from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.integrations import IntegrationService
 from miki_sorter_bot.management import ManagementCommands
 from miki_sorter_bot.operations import OperationsService
+from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.retrieval import RetrievalService
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy
 from miki_sorter_bot.show_ids import show_ids
@@ -93,6 +95,12 @@ def main() -> None:
     indexing = IndexingService(settings, repositories)
     sorting = SortingService(settings, repositories, indexing, delivery_executor)
     retrieval = RetrievalService(settings, repositories, delivery_executor)
+    recovery = JobRecoveryService(
+        repositories,
+        sorting,
+        retrieval,
+        batch_size=settings.job_recovery_batch_size,
+    )
     integrations = IntegrationService(settings, repositories, sorting)
     operations = OperationsService(
         repositories,
@@ -107,12 +115,13 @@ def main() -> None:
         indexing,
         sorting,
         operations,
+        recovery,
     )
     health_server = (
         HealthServer(
             host=settings.health_listen,
             port=settings.health_port,
-            status_provider=repositories.operational_status,
+            status_provider=storage.operational_status,
         )
         if settings.health_server_enabled
         else None
@@ -123,15 +132,22 @@ def main() -> None:
             health_server.stop()
         storage.close()
 
+    async def stop_workers(application: Application) -> None:
+        context = SimpleNamespace(bot=application.bot, application=application)
+        await sorting.shutdown(context)
+
     async def startup_tasks(application: Application) -> None:
         if health_server is not None:
             health_server.start()
+        context = SimpleNamespace(bot=application.bot, application=application)
+        await recovery.run_once(context)
         await _send_startup_checkin(application, settings, repositories)
 
     application = (
         Application.builder()
         .token(settings.bot_token)
         .post_init(startup_tasks)
+        .post_stop(stop_workers)
         .post_shutdown(close_storage)
         .build()
     )
@@ -140,6 +156,7 @@ def main() -> None:
     application.bot_data["retrieval"] = retrieval
     application.bot_data["integrations"] = integrations
     application.bot_data["operations"] = operations
+    application.bot_data["recovery"] = recovery
     application.bot_data["repositories"] = repositories
     application.bot_data["settings"] = settings
     application.bot_data["error_reporter"] = error_reporter
@@ -153,6 +170,7 @@ def main() -> None:
     application.add_error_handler(_handle_error)
     _schedule_daily_backup(application, settings, operations, repositories)
     _schedule_sanity_checks(application, settings, repositories)
+    _schedule_job_recovery(application, settings, recovery)
     _add_management_handlers(application, management)
     application.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, sort_message))
     application.add_handler(
@@ -283,6 +301,28 @@ def _schedule_sanity_checks(application: Application, settings, repositories) ->
         interval=interval_seconds,
         first=interval_seconds,
         name="sanity-check",
+    )
+
+
+def _schedule_job_recovery(
+    application: Application,
+    settings,
+    recovery: JobRecoveryService,
+) -> None:
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Job recovery requested but JobQueue is unavailable.")
+        return
+
+    async def recover_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+        await recovery.run_once(context)
+
+    interval = settings.job_recovery_interval_seconds
+    job_queue.run_repeating(
+        recover_pending,
+        interval=interval,
+        first=interval,
+        name="job-recovery",
     )
 
 

@@ -15,9 +15,7 @@ SECRET = "integration-secret-value"
 
 def _settings(*, scopes: frozenset[str], quota: int = 10) -> SimpleNamespace:
     return SimpleNamespace(
-        integration_clients=(
-            IntegrationClient("client-a", SECRET, scopes, quota),
-        ),
+        integration_clients=(IntegrationClient("client-a", SECRET, scopes, quota),),
         integration_signature_ttl=300,
         archive_chat_id=-200,
         default_request_limit=20,

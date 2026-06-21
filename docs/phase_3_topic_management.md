@@ -51,7 +51,7 @@ Keyword and phrase routes:
 ```
 
 Single-word values are keywords. Multiword values are phrases. Hashtags may be entered with or
-without `#`. Values use Unicode case-folding, whitespace normalization, substring keyword matching, and exact phrase
+without `#`. Values use Unicode case-folding, whitespace normalization, whole-keyword matching, and whitespace-separated phrase
 identity.
 
 Adding an existing mapping to its current topic is idempotent. Adding it to another topic is

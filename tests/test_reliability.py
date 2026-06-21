@@ -5,7 +5,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from miki_sorter_bot.reliability import (
     DeliveryExecutor,
@@ -21,6 +21,7 @@ def test_error_classification_checks_permanent_errors_before_network_base() -> N
     assert unavailable.category == "unavailable_source"
     assert unavailable.unavailable_source
     assert classify_error(NetworkError("down")).retryable
+    assert classify_error(TimedOut("timed out")).outcome_unknown
 
 
 def test_retry_after_is_honored_before_success() -> None:
@@ -52,5 +53,18 @@ def test_permanent_error_is_not_retried() -> None:
 
     with pytest.raises(Forbidden):
         asyncio.run(executor.run(operation))
+
+    assert operation.await_count == 1
+
+
+def test_unknown_delivery_outcome_is_not_retried_when_safety_is_required() -> None:
+    operation = AsyncMock(side_effect=TimedOut("timed out"))
+    executor = DeliveryExecutor(
+        retry_policy=RetryPolicy(attempts=3, base_delay=0, max_delay=0),
+        rate_limiter=RateLimiter(1000),
+    )
+
+    with pytest.raises(TimedOut):
+        asyncio.run(executor.run(operation, retry_unknown_outcome=False))
 
     assert operation.await_count == 1

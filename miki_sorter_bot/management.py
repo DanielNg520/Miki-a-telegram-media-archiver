@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import logging
 import shlex
 
@@ -11,6 +12,7 @@ from miki_sorter_bot.config import Settings
 from miki_sorter_bot.diagnostics import run_diagnostics
 from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.operations import OperationsService
+from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.repositories import SqliteRepositories, normalize_mapping
 from miki_sorter_bot.sorting import SortingService
 
@@ -25,12 +27,14 @@ class ManagementCommands:
         indexing: IndexingService | None = None,
         sorting: SortingService | None = None,
         operations: OperationsService | None = None,
+        recovery: JobRecoveryService | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
         self._indexing = indexing
         self._sorting = sorting
         self._operations = operations
+        self._recovery = recovery
 
     async def topic_register(
         self,
@@ -68,9 +72,7 @@ class ManagementCommands:
         except ValueError as error:
             await message.reply_text(str(error))
             return
-        await message.reply_text(
-            f"Registered topic {topic.name} with ID {topic.thread_id}."
-        )
+        await message.reply_text(f"Registered topic {topic.name} with ID {topic.thread_id}.")
         self._audit(user.id, "topic.register", "topic", str(topic.id))
 
     async def topic_list(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -213,9 +215,12 @@ class ManagementCommands:
             )
             await message.reply_text("Conflict between: " + ", ".join(destinations))
         else:
+            topic = decision.topic
+            if topic is None:
+                await message.reply_text("The matched route has no active destination.")
+                return
             await message.reply_text(
-                f"Routes to {decision.topic.name} ({decision.topic.thread_id}) "
-                f"because {decision.reason}."
+                f"Routes to {topic.name} ({topic.thread_id}) because {decision.reason}."
             )
 
     async def dead_letters(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -230,13 +235,16 @@ class ManagementCommands:
         await message.reply_text(
             "Unresolved dead letters:\n"
             + "\n".join(
-                f"- {row['id']}: {row['operation']} / {row['error_category']} "
-                f"(job {row['job_id']})"
+                f"- {row['id']}: {row['operation']} / {row['error_category']} (job {row['job_id']})"
                 for row in rows
             )
         )
 
-    async def dead_letter_retry(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    async def dead_letter_retry(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
         command = await self._admin_context(update)
         if command is None:
             return
@@ -245,7 +253,8 @@ class ManagementCommands:
         if dead_letter_id is None:
             await message.reply_text("Usage: /dead_letter_retry <dead letter ID>")
             return
-        retried = self._repositories.retry_dead_letter(dead_letter_id)
+        job_id = self._repositories.retry_dead_letter(dead_letter_id)
+        retried = job_id is not None
         await message.reply_text(
             "Dead letter requeued." if retried else "Dead letter could not be requeued."
         )
@@ -256,6 +265,13 @@ class ManagementCommands:
             str(dead_letter_id),
             "success" if retried else "denied",
         )
+        if job_id is not None and self._recovery is not None:
+            coroutine = self._recovery.resume_job(job_id, context)
+            application = getattr(context, "application", None)
+            if application is not None:
+                application.create_task(coroutine, update=update)
+            else:
+                await coroutine
 
     async def audit_log(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._admin_context(update)
@@ -400,30 +416,41 @@ class ManagementCommands:
         if command is None:
             return
         message, chat, user = command
-        parsed = _target_and_value(message.text or "")
+        parsed = _target_and_values(message.text or "", requested_kind)
         if parsed is None:
-            await message.reply_text(
-                f"Usage: /{requested_kind}_add <topic ID> "
-                f"<{requested_kind if requested_kind == 'hashtag' else 'keyword or quoted phrase'}>"
+            value_label = (
+                "comma- or space-separated hashtags"
+                if requested_kind == "hashtag"
+                else "comma-separated keywords or quoted phrases"
             )
+            await message.reply_text(f"Usage: /{requested_kind}_add <topic ID> <{value_label}>")
             return
-        thread_id, value = parsed
-        kind = requested_kind if requested_kind == "hashtag" else _keyword_kind(value)
-        try:
-            mapping = self._repositories.add_mapping(
-                chat.id,
-                thread_id,
-                kind,
-                value,
-                user.id,
-            )
-        except ValueError as error:
-            await message.reply_text(str(error))
-            return
-        await message.reply_text(
-            f"Added {mapping.kind} '{mapping.value}' to topic {thread_id}."
-        )
-        self._audit(user.id, "route.add", "route_mapping", str(mapping.id))
+        thread_id, values = parsed
+        added = []
+        errors = []
+        for value in values:
+            kind = requested_kind if requested_kind == "hashtag" else _keyword_kind(value)
+            try:
+                mapping = self._repositories.add_mapping(
+                    chat.id,
+                    thread_id,
+                    kind,
+                    value,
+                    user.id,
+                )
+            except ValueError as error:
+                errors.append(f"{value}: {error}")
+                continue
+            added.append(mapping)
+            self._audit(user.id, "route.add", "route_mapping", str(mapping.id))
+        if added:
+            labels = ", ".join(f"{mapping.kind} '{mapping.value}'" for mapping in added)
+            reply = f"Added {len(added)} route(s) to topic {thread_id}: {labels}."
+        else:
+            reply = f"No routes were added to topic {thread_id}."
+        if errors:
+            reply += "\nSkipped:\n" + "\n".join(f"- {error}" for error in errors)
+        await message.reply_text(reply)
 
     async def _remove_mapping(self, update: Update, requested_kind: str) -> None:
         command = await self._authorized_context(update)
@@ -432,9 +459,7 @@ class ManagementCommands:
         message, chat, user = command
         parsed = _target_and_value(message.text or "")
         if parsed is None:
-            await message.reply_text(
-                f"Usage: /{requested_kind}_remove <topic ID> <value>"
-            )
+            await message.reply_text(f"Usage: /{requested_kind}_remove <topic ID> <value>")
             return
         thread_id, value = parsed
         kind = requested_kind if requested_kind == "hashtag" else _keyword_kind(value)
@@ -459,9 +484,7 @@ class ManagementCommands:
         message, chat, user = command
         parsed = _target_and_value(message.text or "")
         if parsed is None:
-            await message.reply_text(
-                f"Usage: /{requested_kind}_replace <topic ID> <value>"
-            )
+            await message.reply_text(f"Usage: /{requested_kind}_replace <topic ID> <value>")
             return
         thread_id, value = parsed
         kind = requested_kind if requested_kind == "hashtag" else _keyword_kind(value)
@@ -476,9 +499,7 @@ class ManagementCommands:
         except ValueError as error:
             await message.reply_text(str(error))
             return
-        await message.reply_text(
-            f"Moved {mapping.kind} '{mapping.value}' to topic {thread_id}."
-        )
+        await message.reply_text(f"Moved {mapping.kind} '{mapping.value}' to topic {thread_id}.")
         self._audit(user.id, "route.replace", "route_mapping", str(mapping.id))
 
     async def _list_mappings(self, update: Update, kind: str | None) -> None:
@@ -582,6 +603,30 @@ def _target_and_value(text: str) -> tuple[int, str] | None:
     if thread_id <= 0 or not value:
         return None
     return thread_id, value
+
+
+def _target_and_values(text: str, requested_kind: str) -> tuple[int, tuple[str, ...]] | None:
+    parts = text.split(maxsplit=2)
+    if len(parts) < 3:
+        return None
+    try:
+        thread_id = int(parts[1])
+    except (ValueError, TypeError):
+        return None
+    if requested_kind == "hashtag" and "," not in parts[2]:
+        try:
+            row = shlex.split(parts[2])
+        except ValueError:
+            return None
+    else:
+        try:
+            row = next(csv.reader([parts[2]], skipinitialspace=True))
+        except (csv.Error, StopIteration):
+            return None
+    values = tuple(dict.fromkeys(value.strip() for value in row if value.strip()))
+    if thread_id <= 0 or not values:
+        return None
+    return thread_id, values
 
 
 def _keyword_kind(value: str) -> str:
