@@ -1,0 +1,11 @@
+# Miki webhook reverse proxy — Caddy config.
+# Install: copy to /etc/caddy/Caddyfile (edit the domain), then `systemctl reload caddy`.
+# Caddy obtains and renews a Let's Encrypt cert automatically; just open ports 80 and 443.
+#
+# This must terminate TLS and forward to Miki's internal HTTP server, which runs on
+# 127.0.0.1:8080 (RUN_MODE=webhook, WEBHOOK_PORT=8080, container published to localhost).
+# Keep the proxied path matching WEBHOOK_PATH / WEBHOOK_URL in .env (/telegram/webhook).
+
+miki.yourdomain.com {
+	reverse_proxy 127.0.0.1:8080
+}
