@@ -91,7 +91,9 @@ def test_phase_two_database_upgrades_without_losing_mappings() -> None:
 
     mapping = connection.execute("SELECT value, normalized_value FROM route_mappings").fetchone()
     assert (mapping["value"], mapping["normalized_value"]) == ("ABC", "abc")
-    assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 7
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(
+        MIGRATIONS
+    )
     connection.close()
 
 

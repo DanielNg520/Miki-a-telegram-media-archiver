@@ -184,14 +184,14 @@ messages inside the relevant chat/topic.
 
 ### Permission levels
 
-| Level | Who | How granted |
+| Level | Powers | How granted |
 | --- | --- | --- |
-| **Admin** | Full control | Listed in `ADMIN_USER_IDS` (requires restart), **or** added live with `/manager_add` (no restart). |
-| **Manager** | Same powers as Admin | Added with `/manager_add <user_id>`. Universal (all chats), effective immediately. |
+| **Super admin** | Everything, including operationally critical commands (source topic, forwarding pairs, topic registration, backups, maintenance, reindex, granting admins). | Listed in `ADMIN_USER_IDS` in `.env`. File-based, so it can never be locked out by a runtime change. Adding/removing requires a restart. |
+| **Admin** (limited) | Keyword & hashtag routes (add/remove/replace/list/find), routing diagnostics, and read-only views (lists, status, health, doctor). **Cannot** touch source topic, forwarding, backups, maintenance, reindex, or grant other admins. | Granted live by a super admin with `/manager_add <user_id>`. Universal (all chats), effective immediately, no restart. |
 | **Anyone** | Public/requesters | No special grant; subject to per-command chat/topic rules. |
 
-> Since `/manager_add` grants full admin-equivalent access, "Admin" and "Manager" are
-> interchangeable below. The only difference is how they were added.
+In the tables below, **Who** is the minimum tier required: a command marked **Admin** is also
+available to super admins.
 
 Most commands report a usage hint if you call them with missing or malformed arguments, so when in
 doubt just send the bare command (e.g. `/keyword_add`) to see the expected syntax.
@@ -211,8 +211,8 @@ with the same token (Telegram allows only one polling process).
 
 | Command | Who | Usage | Notes |
 | --- | --- | --- | --- |
-| `/topic_register <name>` | Manager | `/topic_register Japan` | Run **inside** the destination forum topic. Miki must be an admin of the forum. Names must be unique. |
-| `/topic_list` | Manager | `/topic_list` | Lists all active registered topics as `thread_id: name`. |
+| `/topic_register <name>` | Super admin | `/topic_register Japan` | Run **inside** the destination forum topic. Miki must be an admin of the forum. Names must be unique. |
+| `/topic_list` | Admin | `/topic_list` | Lists all active registered topics as `thread_id: name`. |
 
 Topic open/close/rename in Telegram is tracked automatically — closing a topic deactivates it
 (routing/indexing pause), reopening reactivates it, and renaming updates the stored name.
@@ -224,11 +224,11 @@ is a `keyword`; a `"quoted phrase"` is a `phrase`.
 
 | Command | Who | Usage |
 | --- | --- | --- |
-| `/keyword_add <topic_id> <keyword or "phrase"[, ...]>` | Manager | `/keyword_add 7 TOKYO, "Mount Fuji"` |
-| `/keyword_remove <topic_id> <value>` | Manager | `/keyword_remove 7 TOKYO` |
-| `/keyword_replace <topic_id> <value>` | Manager | Moves an existing keyword/phrase to a different topic. |
-| `/keyword_list [topic_id]` | Manager | Lists all keyword **and** phrase routes; optional topic filter. |
-| `/keyword_find <keyword or "phrase">` | Manager | Shows which topic a keyword/phrase routes to. |
+| `/keyword_add <topic_id> <keyword or "phrase"[, ...]>` | Admin | `/keyword_add 7 TOKYO, "Mount Fuji"` |
+| `/keyword_remove <topic_id> <value>` | Admin | `/keyword_remove 7 TOKYO` |
+| `/keyword_replace <topic_id> <value>` | Admin | Moves an existing keyword/phrase to a different topic. |
+| `/keyword_list [topic_id]` | Admin | Lists all keyword **and** phrase routes; optional topic filter. |
+| `/keyword_find <keyword or "phrase">` | Admin | Shows which topic a keyword/phrase routes to. |
 
 ### Hashtag routes
 
@@ -236,23 +236,38 @@ Hashtag routes match `#tags` in a post's caption.
 
 | Command | Who | Usage |
 | --- | --- | --- |
-| `/hashtag_add <topic_id> <hashtag> [...]` | Manager | `/hashtag_add 7 travel #tokyo` or `/hashtag_add 7 travel, #tokyo` |
-| `/hashtag_remove <topic_id> <hashtag>` | Manager | `/hashtag_remove 7 travel` |
-| `/hashtag_replace <topic_id> <hashtag>` | Manager | Moves a hashtag route to a different topic. |
-| `/hashtag_list [topic_id]` | Manager | Lists hashtag routes; optional topic filter. |
+| `/hashtag_add <topic_id> <hashtag> [...]` | Admin | `/hashtag_add 7 travel #tokyo` or `/hashtag_add 7 travel, #tokyo` |
+| `/hashtag_remove <topic_id> <hashtag>` | Admin | `/hashtag_remove 7 travel` |
+| `/hashtag_replace <topic_id> <hashtag>` | Admin | Moves a hashtag route to a different topic. |
+| `/hashtag_list [topic_id]` | Admin | Lists hashtag routes; optional topic filter. |
 
 ### Routing diagnostics
 
 | Command | Who | Usage | What it does |
 | --- | --- | --- | --- |
-| `/route_explain <caption text>` | Manager | `/route_explain Visiting #TOKYO today` | Dry-run: shows which topic the text would route to, the reason, or reports `unmatched` / a `conflict` between topics. |
+| `/route_explain <caption text>` | Admin | `/route_explain Visiting #TOKYO today` | Dry-run: shows which topic the text would route to, the reason, or reports `unmatched` / a `conflict` between topics. |
+
+### Source topic & forwarding
+
+These change which topic Miki listens to and where attachments are forwarded. They are stored in
+the database and take effect **immediately, without a restart** — handy for changes you make
+periodically. `SOURCE_THREAD_ID` and `TOPIC_FORWARDING_JSON` in `.env` are only the initial seed;
+once set at runtime, the database is authoritative.
+
+| Command | Who | Usage | What it does |
+| --- | --- | --- | --- |
+| `/source_show` | Admin | `/source_show` | Shows the topic Miki currently listens to and whether it's a runtime override or the `.env` default. |
+| `/source_set <topic_id>` | Super admin | `/source_set 4242` | Switches the listening source topic. Effective immediately. |
+| `/forward_list` | Admin | `/forward_list` | Lists all `source -> destination` forwarding pairs. |
+| `/forward_add <src_topic_id> <dest_topic_id>` | Super admin | `/forward_add 5 9` | Forwards attachments from a source topic to a destination topic. Many sources may point at one destination; re-adding a source replaces its destination. |
+| `/forward_remove <src_topic_id>` | Super admin | `/forward_remove 5` | Removes the forwarding pair for a source topic. |
 
 ### Access control
 
 | Command | Who | Usage | What it does |
 | --- | --- | --- | --- |
-| `/manager_add <user_id>` | Admin/Manager | `/manager_add 123456789` | Grants full, universal, restart-free access. |
-| `/manager_remove <user_id>` | Admin/Manager | `/manager_remove 123456789` | Revokes the manager from every chat. |
+| `/manager_add <user_id>` | Super admin | `/manager_add 123456789` | Grants a limited admin (keywords/hashtags + diagnostics), universal across chats, restart-free. |
+| `/manager_remove <user_id>` | Super admin | `/manager_remove 123456789` | Revokes a limited admin from every chat. |
 
 ### Retrieval (`#request`)
 
@@ -280,25 +295,26 @@ Bot requesters must also be listed in `REQUESTER_BOT_IDS`. Miki replies with a j
 
 | Command | Who | Usage | What it does |
 | --- | --- | --- | --- |
-| `/request_cancel <job_id>` | Admin/Manager | `/request_cancel 42` | Cancels an in-progress retrieval job. |
+| `/request_cancel <job_id>` | Admin | `/request_cancel 42` | Cancels an in-progress retrieval job. |
 
 ### Search index maintenance
 
 | Command | Who | Usage | What it does |
 | --- | --- | --- | --- |
-| `/reindex [batch_size]` | Admin/Manager | `/reindex 200` | Re-extracts search tokens for stored posts (batch 1–1000, default 100). Reports how many were processed. |
+| `/reindex [batch_size]` | Super admin | `/reindex 200` | Re-extracts search tokens for stored posts (batch 1–1000, default 100). Reports how many were processed. |
 
 ### Operations & monitoring
 
 | Command | Who | Usage | What it does |
 | --- | --- | --- | --- |
-| `/health` | Admin/Manager | `/health` | Reports overall health plus database and Telegram connectivity. |
-| `/status` | Admin/Manager | `/status` | Operational snapshot: posts, dead letters, job counts, retries/throttles, average delivery time. |
-| `/maintenance` | Admin/Manager | `/maintenance` | Prunes expired transient records and old audit events per retention settings. |
-| `/backup` | Admin/Manager | `/backup` | Creates an on-demand verified database backup (in addition to the daily auto-backup). |
-| `/dead_letters` | Admin/Manager | `/dead_letters` | Lists unresolved terminal failures (id, operation, error category, job). |
-| `/dead_letter_retry <id>` | Admin/Manager | `/dead_letter_retry 5` | Requeues a single dead-lettered operation. |
-| `/audit_log [limit]` | Admin/Manager | `/audit_log 50` | Shows recent audit events (limit 1–100, default 20). |
+| `/health` | Admin | `/health` | Reports overall health plus database and Telegram connectivity. |
+| `/status` | Admin | `/status` | Operational snapshot: posts, dead letters, job counts, retries/throttles, average delivery time. |
+| `/doctor` | Admin | `/doctor` | Human-readable configuration and connectivity diagnostics. |
+| `/maintenance` | Super admin | `/maintenance` | Prunes expired transient records and old audit events per retention settings. |
+| `/backup` | Super admin | `/backup` | Creates an on-demand verified database backup (in addition to the daily auto-backup). |
+| `/dead_letters` | Super admin | `/dead_letters` | Lists unresolved terminal failures (id, operation, error category, job). |
+| `/dead_letter_retry <id>` | Super admin | `/dead_letter_retry 5` | Requeues a single dead-lettered operation. |
+| `/audit_log [limit]` | Super admin | `/audit_log 50` | Shows recent audit events (limit 1–100, default 20). |
 
 ## Topic and Route Management
 
@@ -320,13 +336,20 @@ Route commands:
 /keyword_find <keyword or quoted phrase>
 ```
 
-An admin or existing manager can grant full management access with
-`/manager_add <user_id>` and revoke it with `/manager_remove <user_id>`. Managers
-added this way are **universal** — they have the same powers as users in
-`ADMIN_USER_IDS`, work in every chat, can themselves delegate, and the grant takes
-effect **immediately with no restart** (it is stored in the database and checked
-live). By contrast, editing `ADMIN_USER_IDS` in `.env` is only read at startup and
-**does** require a restart, so `/manager_add` is the preferred way to add people.
+A **super admin** (a user in `ADMIN_USER_IDS`) can grant a **limited admin** with
+`/manager_add <user_id>` and revoke it with `/manager_remove <user_id>`. Limited
+admins can manage keyword/hashtag routes and view diagnostics across every chat,
+effective **immediately with no restart** (stored in the database and checked live),
+but they **cannot** change the source topic or forwarding, run backups/maintenance/
+reindex, register topics, or grant other admins — those stay super-admin-only.
+Editing `ADMIN_USER_IDS` in `.env` is only read at startup and **does** require a
+restart; that roster is deliberately file-based so it can never be locked out by a
+runtime change.
+
+The source topic (`/source_set`) and forwarding pairs (`/forward_add` /
+`/forward_remove`) are likewise stored in the database and applied live — change them
+from Telegram without restarting. The `.env` values `SOURCE_THREAD_ID` and
+`TOPIC_FORWARDING_JSON` seed the initial configuration on first run only.
 
 ## Search Index
 

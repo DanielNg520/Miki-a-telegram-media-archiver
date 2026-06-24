@@ -268,6 +268,25 @@ MIGRATIONS = (
         );
         """,
     ),
+    Migration(
+        8,
+        "runtime_admin_config",
+        """
+        CREATE TABLE runtime_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_by_user_id INTEGER,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE forwarding_pairs (
+            source_thread_id INTEGER PRIMARY KEY CHECK (source_thread_id > 0),
+            destination_thread_id INTEGER NOT NULL CHECK (destination_thread_id > 0),
+            created_by_user_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
+    ),
 )
 
 

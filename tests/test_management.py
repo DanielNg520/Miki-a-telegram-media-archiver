@@ -164,18 +164,20 @@ def test_bulk_add_reports_invalid_values_without_blocking_valid_ones(
     assert "bad tag" in reply
 
 
-def test_manager_grant_is_universal_and_can_delegate(database_connection) -> None:
+def test_limited_admin_cannot_delegate(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
-    # Granted in one chat...
+    # A limited admin (granted via /manager_add) is NOT a super admin...
     repositories.grant_route_manager(-100, 20, 10)
     commands = ManagementCommands(_settings(10), repositories)
 
-    # ...the manager has full admin powers in a *different* chat, no restart.
+    # ...so they cannot grant other admins; that is super-admin-only.
     update = _update("/manager_add 30", user_id=20, chat_id=-999)
     asyncio.run(commands.manager_add(update, SimpleNamespace()))
 
-    assert repositories.is_manager(30)
-    assert repositories.is_manager(20)
+    assert not repositories.is_manager(30)
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "Only a Miki super administrator can do that."
+    )
 
 
 def test_non_manager_cannot_delegate(database_connection) -> None:
