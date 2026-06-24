@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -45,6 +46,13 @@ class RouteMappingRecord:
     kind: str
     value: str
     normalized_value: str
+    created_by_user_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardingPairRecord:
+    source_thread_id: int
+    destination_thread_id: int
     created_by_user_id: int | None
 
 
@@ -151,6 +159,30 @@ class AuthorizationRepository(Protocol):
     def revoke_route_manager(self, chat_id: int, user_id: int) -> bool: ...
 
     def revoke_manager(self, user_id: int) -> bool: ...
+
+
+class RuntimeConfigRepository(Protocol):
+    def get_runtime_setting(self, key: str) -> str | None: ...
+
+    def set_runtime_setting(
+        self,
+        key: str,
+        value: str,
+        updated_by_user_id: int | None = None,
+    ) -> None: ...
+
+    def get_forwarding_destination(self, source_thread_id: int) -> int | None: ...
+
+    def list_forwarding_pairs(self) -> list[ForwardingPairRecord]: ...
+
+    def add_forwarding_pair(
+        self,
+        source_thread_id: int,
+        destination_thread_id: int,
+        created_by_user_id: int | None = None,
+    ) -> bool: ...
+
+    def remove_forwarding_pair(self, source_thread_id: int) -> bool: ...
 
 
 class ProcessedUpdateRepository(Protocol):
@@ -505,6 +537,118 @@ class SqliteRepositories:
                 (user_id,),
             )
         return cursor.rowcount > 0
+
+    def get_runtime_setting(self, key: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT value FROM runtime_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return row["value"] if row is not None else None
+
+    def set_runtime_setting(
+        self,
+        key: str,
+        value: str,
+        updated_by_user_id: int | None = None,
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO runtime_settings (key, value, updated_by_user_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (key, value, updated_by_user_id),
+            )
+
+    def get_forwarding_destination(self, source_thread_id: int) -> int | None:
+        row = self._connection.execute(
+            "SELECT destination_thread_id FROM forwarding_pairs WHERE source_thread_id = ?",
+            (source_thread_id,),
+        ).fetchone()
+        return row["destination_thread_id"] if row is not None else None
+
+    def list_forwarding_pairs(self) -> list[ForwardingPairRecord]:
+        rows = self._connection.execute(
+            """
+            SELECT source_thread_id, destination_thread_id, created_by_user_id
+            FROM forwarding_pairs
+            ORDER BY source_thread_id
+            """
+        ).fetchall()
+        return [
+            ForwardingPairRecord(
+                source_thread_id=row["source_thread_id"],
+                destination_thread_id=row["destination_thread_id"],
+                created_by_user_id=row["created_by_user_id"],
+            )
+            for row in rows
+        ]
+
+    def add_forwarding_pair(
+        self,
+        source_thread_id: int,
+        destination_thread_id: int,
+        created_by_user_id: int | None = None,
+    ) -> bool:
+        if source_thread_id <= 0 or destination_thread_id <= 0:
+            raise ValueError("source and destination topic IDs must be positive")
+        if source_thread_id == destination_thread_id:
+            raise ValueError("source and destination topics must differ")
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO forwarding_pairs
+                    (source_thread_id, destination_thread_id, created_by_user_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT (source_thread_id) DO UPDATE SET
+                    destination_thread_id = excluded.destination_thread_id,
+                    created_by_user_id = excluded.created_by_user_id,
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                (source_thread_id, destination_thread_id, created_by_user_id),
+            )
+        return True
+
+    def remove_forwarding_pair(self, source_thread_id: int) -> bool:
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM forwarding_pairs WHERE source_thread_id = ?",
+                (source_thread_id,),
+            )
+        return cursor.rowcount > 0
+
+    def seed_forwarding_pairs(self, pairs: Iterable[Any]) -> None:
+        """One-time import of ``TOPIC_FORWARDING_JSON`` pairs into the database.
+
+        Guarded by a ``forwarding_seeded`` flag so the database stays the source
+        of truth afterwards: pairs removed via Telegram are not re-added on the
+        next startup.
+        """
+
+        if self.get_runtime_setting("forwarding_seeded") is not None:
+            return
+        with self._connection:
+            for pair in pairs:
+                self._connection.execute(
+                    """
+                    INSERT INTO forwarding_pairs
+                        (source_thread_id, destination_thread_id)
+                    VALUES (?, ?)
+                    ON CONFLICT (source_thread_id) DO NOTHING
+                    """,
+                    (pair.source_thread_id, pair.destination_thread_id),
+                )
+            self._connection.execute(
+                """
+                INSERT INTO runtime_settings (key, value)
+                VALUES ('forwarding_seeded', '1')
+                ON CONFLICT (key) DO NOTHING
+                """
+            )
 
     def upsert_post(
         self,

@@ -125,18 +125,43 @@ class SortingService:
         self._album_flush_delay = getattr(settings, "album_flush_delay_seconds", 5.0)
         self._album_max_wait = getattr(settings, "album_max_wait_seconds", 30.0)
         self._suspend_album_reschedule = False
-        self._forwarding_pairs = {
-            pair.source_thread_id: pair for pair in getattr(settings, "topic_forwarding_pairs", ())
-        }
+        # Reconcile env-configured forwarding pairs into the database once, so
+        # the DB is the live source of truth and pairs become manageable via
+        # Telegram without a restart.
+        self._repositories.seed_forwarding_pairs(getattr(settings, "topic_forwarding_pairs", ()))
+
+    def _effective_source_thread_id(self) -> int:
+        """The topic Miki listens to: a runtime override if set, else the env value.
+
+        Read live from the database so ``/source_set`` takes effect without a
+        restart, mirroring how route mappings are resolved per message.
+        """
+
+        override = self._repositories.get_runtime_setting("source_thread_id")
+        if override is not None:
+            try:
+                return int(override)
+            except ValueError:
+                LOGGER.warning(
+                    "Ignoring invalid runtime source_thread_id override",
+                    extra={"value": override},
+                )
+        return self._settings.source_thread_id
 
     def _forwarding_pair(
         self,
         source_chat_id: int,
         source_thread_id: int | None,
     ) -> TopicForwardingPair | None:
-        if source_chat_id != self._settings.source_chat_id:
+        if source_chat_id != self._settings.source_chat_id or source_thread_id is None:
             return None
-        return self._forwarding_pairs.get(source_thread_id)
+        destination = self._repositories.get_forwarding_destination(source_thread_id)
+        if destination is None:
+            return None
+        return TopicForwardingPair(
+            source_thread_id=source_thread_id,
+            destination_thread_id=destination,
+        )
 
     def _direct_decision(self, pair: TopicForwardingPair) -> SortDecision | None:
         thread_id = pair.destination_thread_id
@@ -195,11 +220,11 @@ class SortingService:
             )
 
         forwarding_pair = self._forwarding_pair(chat.id, source_thread_id)
-        is_legacy_source = (
+        is_primary_source = (
             chat.id == self._settings.source_chat_id
-            and source_thread_id == self._settings.source_thread_id
+            and source_thread_id == self._effective_source_thread_id()
         )
-        if forwarding_pair is None and not is_legacy_source:
+        if forwarding_pair is None and not is_primary_source:
             return
         sender = getattr(message, "from_user", None)
         if getattr(sender, "id", None) == context.bot.id:

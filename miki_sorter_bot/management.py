@@ -41,7 +41,7 @@ class ManagementCommands:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        command = await self._authorized_context(update)
+        command = await self._admin_context(update)
         if command is None:
             return
         message, chat, user = command
@@ -136,6 +136,107 @@ class ManagementCommands:
     async def hashtag_list(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await self._list_mappings(update, "hashtag")
 
+    async def source_show(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._authorized_context(update)
+        if command is None:
+            return
+        message, _, _ = command
+        override = self._repositories.get_runtime_setting("source_thread_id")
+        if override is not None:
+            await message.reply_text(
+                f"Listening to source topic {override} (runtime override; "
+                f".env default is {self._settings.source_thread_id})."
+            )
+        else:
+            await message.reply_text(
+                f"Listening to source topic {self._settings.source_thread_id} "
+                "(from .env; no runtime override set)."
+            )
+
+    async def source_set(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        target = _single_integer_argument(message.text or "")
+        if target is None or target <= 0:
+            await message.reply_text("Usage: /source_set <source topic ID (positive integer)>")
+            return
+        self._repositories.set_runtime_setting("source_thread_id", str(target), user.id)
+        await message.reply_text(
+            f"Now listening to source topic {target} (effective immediately, no restart)."
+        )
+        self._audit(user.id, "source.set", "runtime_setting", str(target))
+
+    async def forward_add(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        parsed = _two_integer_arguments(message.text or "")
+        if parsed is None:
+            await message.reply_text("Usage: /forward_add <source topic ID> <destination topic ID>")
+            return
+        source_thread_id, destination_thread_id = parsed
+        try:
+            self._repositories.add_forwarding_pair(
+                source_thread_id,
+                destination_thread_id,
+                user.id,
+            )
+        except ValueError as error:
+            await message.reply_text(str(error))
+            return
+        await message.reply_text(
+            f"Forwarding source topic {source_thread_id} -> "
+            f"destination topic {destination_thread_id} (effective immediately)."
+        )
+        self._audit(
+            user.id,
+            "forwarding.add",
+            "forwarding_pair",
+            f"{source_thread_id}->{destination_thread_id}",
+        )
+
+    async def forward_remove(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        target = _single_integer_argument(message.text or "")
+        if target is None or target <= 0:
+            await message.reply_text("Usage: /forward_remove <source topic ID>")
+            return
+        removed = self._repositories.remove_forwarding_pair(target)
+        await message.reply_text(
+            f"Forwarding for source topic {target} removed."
+            if removed
+            else f"No forwarding pair was configured for source topic {target}."
+        )
+        self._audit(
+            user.id,
+            "forwarding.remove",
+            "forwarding_pair",
+            str(target),
+            "success" if removed else "denied",
+        )
+
+    async def forward_list(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._authorized_context(update)
+        if command is None:
+            return
+        message, _, _ = command
+        pairs = self._repositories.list_forwarding_pairs()
+        if not pairs:
+            await message.reply_text("No forwarding pairs are configured.")
+            return
+        await message.reply_text(
+            "Forwarding pairs (source -> destination):\n"
+            + "\n".join(
+                f"- {pair.source_thread_id} -> {pair.destination_thread_id}" for pair in pairs
+            )
+        )
+
     async def manager_add(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._admin_context(update)
         if command is None:
@@ -147,8 +248,9 @@ class ManagementCommands:
             return
         created = self._repositories.grant_route_manager(chat.id, target, user.id)
         await message.reply_text(
-            f"Manager {target} {'added' if created else 'was already authorized'} "
-            "(full access, all chats, effective immediately)."
+            f"Admin {target} {'added' if created else 'was already authorized'} "
+            "(limited tier: keywords/hashtags and diagnostics, all chats, "
+            "effective immediately)."
         )
         self._audit(user.id, "manager.add", "telegram_user", str(target))
 
@@ -300,7 +402,7 @@ class ManagementCommands:
         )
 
     async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        command = await self._admin_context(update)
+        command = await self._authorized_context(update)
         if command is None:
             return
         message, _, _ = command
@@ -315,7 +417,7 @@ class ManagementCommands:
         )
 
     async def status(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-        command = await self._admin_context(update)
+        command = await self._authorized_context(update)
         if command is None:
             return
         message, _, _ = command
@@ -341,7 +443,7 @@ class ManagementCommands:
         )
 
     async def doctor(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-        command = await self._admin_context(update)
+        command = await self._authorized_context(update)
         if command is None:
             return
         message, _, _ = command
@@ -541,24 +643,36 @@ class ManagementCommands:
         return message, chat, user
 
     async def _admin_context(self, update: Update):
+        """Gate super-admin-only commands (operationally critical / destructive)."""
+
         message = update.effective_message
         chat = update.effective_chat
         user = update.effective_user
         if message is None or chat is None or user is None:
             return None
-        if not self._is_admin(user.id):
-            await message.reply_text("Only a configured Miki administrator can do that.")
+        if not self._is_super_admin(user.id):
+            await message.reply_text("Only a Miki super administrator can do that.")
             return None
         return message, chat, user
 
-    def _is_admin(self, user_id: int) -> bool:
-        """Configured admins and users granted via /manager_add are equivalent.
+    def _is_super_admin(self, user_id: int) -> bool:
+        """Super admins are the ``ADMIN_USER_IDS`` roster from ``.env``.
 
-        Managers are checked across all chats so the grant is universal, and they
-        share full admin powers — both effective immediately, without a restart.
+        This roster is the top tier with full authority and, being file-based,
+        can never be locked out by a runtime change.
         """
 
-        return user_id in self._settings.admin_user_ids or self._repositories.is_manager(user_id)
+        return user_id in self._settings.admin_user_ids
+
+    def _is_admin(self, user_id: int) -> bool:
+        """Super admins plus limited admins granted at runtime via /manager_add.
+
+        Limited admins (route managers) may manage keywords/hashtags and view
+        diagnostics, but not the super-admin-only commands. Both tiers are
+        effective immediately, without a restart.
+        """
+
+        return self._is_super_admin(user_id) or self._repositories.is_manager(user_id)
 
     def _audit(
         self,
@@ -645,6 +759,18 @@ def _single_integer_argument(text: str) -> int | None:
         return int(parts[1])
     except ValueError:
         return None
+
+
+def _two_integer_arguments(text: str) -> tuple[int, int] | None:
+    parts = text.split()
+    if len(parts) != 3:
+        return None
+    try:
+        first = int(parts[1])
+        second = int(parts[2])
+    except ValueError:
+        return None
+    return first, second
 
 
 def _optional_integer_argument(text: str) -> int | None | bool:
