@@ -1,11 +1,14 @@
 PYTHON ?= .venv/bin/python
 
-.PHONY: verify test compile deps lint format-check typecheck security audit package doctor runtime-check run show-ids
+.PHONY: verify test coverage compile deps lint format-check typecheck security audit package doctor runtime-check run show-ids
 
 verify: test compile deps lint format-check typecheck security audit package
 
 test:
 	$(PYTHON) -m pytest -q
+
+coverage:
+	$(PYTHON) -m pytest -q --cov=miki_sorter_bot --cov-report=term-missing
 
 compile:
 	$(PYTHON) -m compileall -q miki_sorter_bot tests
