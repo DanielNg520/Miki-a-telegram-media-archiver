@@ -443,6 +443,82 @@ def test_album_members_reuse_the_caption_decision_and_preserve_order(
     assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
 
 
+def test_straggling_album_member_does_not_cancel_in_flight_delivery(
+    database_connection,
+) -> None:
+    """Regression: webhook delivers album members as separate, staggered POSTs.
+
+    A member arriving after the debounce timer fired must not cancel the
+    in-flight ``send_media_group``; doing so dropped the members already in
+    flight (only reproducible off the batched polling path).
+    """
+
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    settings = _settings()
+    settings.album_flush_delay_seconds = 0.05
+    settings.album_max_wait_seconds = 30.0
+    service = SortingService(
+        settings,
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+
+    async def slow_send_media_group(**kwargs):
+        delivery_started.set()
+        await release_delivery.wait()
+        return [SimpleNamespace(message_id=90), SimpleNamespace(message_id=91)]
+
+    bot = SimpleNamespace(
+        id=50,
+        send_media_group=AsyncMock(side_effect=slow_send_media_group),
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=92)),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        for message_id, caption in ((12, "#Japan"), (13, "")):
+            await service.handle_update(
+                SimpleNamespace(
+                    effective_message=_message(
+                        caption, message_id=message_id, media_group_id="album-1"
+                    ),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        # Wait for the debounce timer to fire and enter send_media_group.
+        await asyncio.wait_for(delivery_started.wait(), timeout=2.0)
+        # Straggler lands while the grouped send is mid-flight.
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message(
+                    "", message_id=14, media_group_id="album-1"
+                ),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        release_delivery.set()
+        # Let the in-flight send finish and the straggler flush on its own.
+        await asyncio.sleep(0.2)
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run())
+
+    # The original two members were delivered by the grouped send, not dropped.
+    bot.send_media_group.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+    assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
+    # The straggler is routed in a follow-up flush.
+    assert repositories.get_delivery(-100, 14, -200, 9).status == "sent"
+
+
 def test_short_media_group_response_suppresses_unsafe_fallback(
     database_connection,
 ) -> None:

@@ -122,6 +122,12 @@ class SortingService:
         self._album_source_threads: OrderedDict[tuple[int, str], int] = OrderedDict()
         self._pending_albums: dict[tuple[int, str], PendingAlbum] = {}
         self._album_flush_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
+        # Keys whose flush task has passed its debounce sleep and is mid-delivery.
+        # A straggling album member must not cancel an in-flight send, or those
+        # members are lost (webhook delivers album members as separate, staggered
+        # POSTs, so stragglers past the flush delay are common; polling batches
+        # them so the race never triggers).
+        self._delivering_albums: set[tuple[int, str]] = set()
         self._album_flush_delay = getattr(settings, "album_flush_delay_seconds", 5.0)
         self._album_max_wait = getattr(settings, "album_max_wait_seconds", 30.0)
         self._suspend_album_reschedule = False
@@ -306,7 +312,15 @@ class SortingService:
             pending.decision = decision
         pending.messages[message.message_id] = message
         existing_task = self._album_flush_tasks.get(key)
-        if existing_task is not None and not existing_task.done():
+        if (
+            existing_task is not None
+            and not existing_task.done()
+            and key not in self._delivering_albums
+        ):
+            # Only reset the debounce while the prior task is still waiting. If it
+            # is already delivering, cancelling it would abort the in-flight send
+            # and drop those members; let it finish and route this straggler in a
+            # fresh flush instead.
             existing_task.cancel()
         self._album_flush_tasks[key] = asyncio.create_task(
             self._flush_album_after_delay(key, context)
@@ -319,8 +333,12 @@ class SortingService:
     ) -> None:
         try:
             await asyncio.sleep(self._album_flush_delay)
+            # No await between here and the delivery's first await, so marking the
+            # key now reliably protects the in-flight send from a straggler cancel.
+            self._delivering_albums.add(key)
             await self._deliver_album_background(key, context)
         finally:
+            self._delivering_albums.discard(key)
             try:
                 current_task = asyncio.current_task()
             except RuntimeError:
