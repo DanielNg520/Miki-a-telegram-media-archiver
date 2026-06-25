@@ -64,8 +64,18 @@ def _handler(status_provider: MetricProvider) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             if self.path == "/healthz":
-                healthy = status.get("database") == "ok" and status.get("foreign_keys") is True
-                body = {"ok": healthy, "database": status.get("database")}
+                database_ok = status.get("database") == "ok" and status.get("foreign_keys") is True
+                # Conservative: only fail liveness when the webhook is *confidently*
+                # wedged (breaker open AND updates stale). A quiet source must never
+                # trip the Docker healthcheck into a restart loop.
+                webhook = status.get("webhook") or {}
+                webhook_wedged = bool(webhook.get("wedged"))
+                healthy = database_ok and not webhook_wedged
+                body = {
+                    "ok": healthy,
+                    "database": status.get("database"),
+                    "webhook_wedged": webhook_wedged,
+                }
                 self._send_json(body, HTTPStatus.OK if healthy else HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             if self.path == "/metrics":
@@ -107,7 +117,27 @@ def _metrics_text(status: dict[str, Any]) -> str:
         lines.append(f'miki_deliveries{{state="{_label(state)}"}} {int(count)}')
     for name, value in sorted(status.get("metrics", {}).items()):
         lines.append(f"miki_metric_{_metric_name(name)} {int(value)}")
+    lines.extend(_webhook_metrics(status.get("webhook")))
     return "\n".join(lines) + "\n"
+
+
+def _webhook_metrics(webhook: Any) -> list[str]:
+    if not webhook or not webhook.get("enabled"):
+        return []
+    last_error_age = webhook.get("last_error_age_seconds")
+    return [
+        f"miki_webhook_enabled {int(bool(webhook.get('enabled')))}",
+        f"miki_webhook_healthy {int(bool(webhook.get('healthy')))}",
+        f"miki_webhook_wedged {int(bool(webhook.get('wedged')))}",
+        f"miki_webhook_url_matches {int(bool(webhook.get('url_matches')))}",
+        f"miki_webhook_pending_updates {int(webhook.get('pending_update_count', 0))}",
+        f"miki_webhook_seconds_since_update {int(webhook.get('seconds_since_update', 0))}",
+        f"miki_webhook_reconciliations {int(webhook.get('reconciliations', 0))}",
+        "miki_webhook_breaker_open "
+        f"{int(webhook.get('breaker_state') == 'open')}",
+        "miki_webhook_last_error_age_seconds "
+        f"{int(last_error_age) if last_error_age is not None else -1}",
+    ]
 
 
 def _label(value: str) -> str:

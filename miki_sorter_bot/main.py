@@ -6,7 +6,14 @@ from types import SimpleNamespace
 from pydantic import ValidationError
 from telegram import Update
 from telegram.error import NetworkError, TimedOut
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    TypeHandler,
+    filters,
+)
 
 from miki_sorter_bot.config import Settings, get_settings
 from miki_sorter_bot.diagnostics import DiagnosticReport, run_diagnostics
@@ -28,6 +35,13 @@ from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPoli
 from miki_sorter_bot.show_ids import show_ids
 from miki_sorter_bot.sorting import SortingService
 from miki_sorter_bot.storage import Storage
+from miki_sorter_bot.webhook_supervisor import (
+    Heartbeat,
+    NullWebhookSupervisor,
+    SupervisorLike,
+    WebhookSupervisor,
+    webhook_desired_state,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -131,11 +145,20 @@ def _run(settings: Settings) -> None:
         operations,
         recovery,
     )
+    heartbeat = Heartbeat()
+
+    def operational_status_with_webhook() -> dict:
+        status = storage.operational_status()
+        supervisor = application.bot_data.get("webhook_supervisor")
+        if supervisor is not None:
+            status["webhook"] = supervisor.snapshot().as_dict()
+        return status
+
     health_server = (
         HealthServer(
             host=settings.health_listen,
             port=settings.health_port,
-            status_provider=storage.operational_status,
+            status_provider=operational_status_with_webhook,
         )
         if settings.health_server_enabled
         else None
@@ -174,6 +197,17 @@ def _run(settings: Settings) -> None:
     application.bot_data["repositories"] = repositories
     application.bot_data["settings"] = settings
     application.bot_data["error_reporter"] = error_reporter
+    webhook_supervisor: SupervisorLike = (
+        WebhookSupervisor(
+            bot=application.bot,
+            settings=settings,
+            heartbeat=heartbeat,
+            increment_metric=repositories.increment_metric,
+        )
+        if settings.run_mode == "webhook"
+        else NullWebhookSupervisor(mode=settings.run_mode)
+    )
+    application.bot_data["webhook_supervisor"] = webhook_supervisor
     LOGGER.info(
         "Album buffering configured",
         extra={
@@ -185,7 +219,11 @@ def _run(settings: Settings) -> None:
     _schedule_daily_backup(application, settings, operations, repositories)
     _schedule_sanity_checks(application, settings, repositories)
     _schedule_job_recovery(application, settings, recovery)
+    _schedule_webhook_reconcile(application, settings, webhook_supervisor)
     _add_management_handlers(application, management)
+    # group=-1 runs before routing: every inbound update proves liveness without
+    # consuming it for the sorting/indexing/retrieval groups.
+    application.add_handler(TypeHandler(Update, heartbeat.tap), group=-1)
     application.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, sort_message))
     application.add_handler(
         MessageHandler(
@@ -238,16 +276,17 @@ def _run_application(application: Application, settings) -> None:
                 "path": settings.webhook_path,
             },
         )
+        desired = webhook_desired_state(settings)
         application.run_webhook(
             listen=settings.webhook_listen,
             port=settings.webhook_port,
             url_path=settings.webhook_path.lstrip("/"),
-            webhook_url=settings.webhook_url,
-            allowed_updates=Update.ALL_TYPES,
+            webhook_url=desired.url,
+            allowed_updates=list(desired.allowed_updates),
             bootstrap_retries=settings.telegram_bootstrap_retries,
             drop_pending_updates=settings.telegram_drop_pending_updates,
-            max_connections=settings.webhook_max_connections,
-            secret_token=settings.webhook_secret_token or None,
+            max_connections=desired.max_connections,
+            secret_token=desired.secret_token,
         )
         return
 
@@ -337,6 +376,38 @@ def _schedule_job_recovery(
         interval=interval,
         first=interval,
         name="job-recovery",
+    )
+
+
+def _schedule_webhook_reconcile(
+    application: Application,
+    settings,
+    supervisor: SupervisorLike,
+) -> None:
+    if settings.run_mode != "webhook" or not settings.webhook_reconcile_enabled:
+        return
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Webhook reconciliation requested but JobQueue is unavailable.")
+        return
+
+    async def reconcile_tick(_: ContextTypes.DEFAULT_TYPE) -> None:
+        token = set_correlation_id("webhook-reconcile")
+        try:
+            await supervisor.reconcile()
+        finally:
+            reset_correlation_id(token)
+
+    interval = settings.webhook_reconcile_interval_seconds
+    job_queue.run_repeating(
+        reconcile_tick,
+        interval=interval,
+        first=interval,
+        name="webhook-reconcile",
+    )
+    LOGGER.info(
+        "Scheduled webhook reconciliation",
+        extra={"interval_seconds": interval},
     )
 
 

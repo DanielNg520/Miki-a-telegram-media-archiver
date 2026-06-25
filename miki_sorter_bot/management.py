@@ -416,7 +416,7 @@ class ManagementCommands:
             f"Telegram: {'ok' if report.telegram_ok else 'failed'}"
         )
 
-    async def status(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._authorized_context(update)
         if command is None:
             return
@@ -430,7 +430,7 @@ class ManagementCommands:
         operations = metrics.get("telegram_delivery_operations", 0)
         duration = metrics.get("telegram_delivery_duration_ms", 0)
         average_ms = round(duration / operations) if operations else 0
-        await message.reply_text(
+        body = (
             "Operational status:\n"
             f"- database: {status['database']}\n"
             f"- available posts: {status['posts']}\n"
@@ -441,13 +441,27 @@ class ManagementCommands:
             f"- Telegram throttles: {metrics.get('telegram_throttles', 0)}\n"
             f"- average delivery time: {average_ms} ms"
         )
+        await message.reply_text(body + self._webhook_section(context))
 
-    async def doctor(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    async def doctor(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._authorized_context(update)
         if command is None:
             return
         message, _, _ = command
-        await message.reply_text(run_diagnostics(self._settings, self._repositories).format())
+        report = run_diagnostics(self._settings, self._repositories).format()
+        await message.reply_text(report + self._webhook_section(context))
+
+    @staticmethod
+    def _webhook_section(context: ContextTypes.DEFAULT_TYPE) -> str:
+        application = getattr(context, "application", None)
+        bot_data = getattr(application, "bot_data", None) or {}
+        supervisor = bot_data.get("webhook_supervisor")
+        if supervisor is None:
+            return ""
+        snapshot = supervisor.snapshot()
+        if not snapshot.enabled:
+            return ""
+        return "\n\nWebhook supervision:\n" + "\n".join(snapshot.summary_lines())
 
     async def maintenance(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._admin_context(update)

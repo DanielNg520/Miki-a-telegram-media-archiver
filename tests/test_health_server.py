@@ -30,12 +30,60 @@ def test_health_server_exposes_health_and_metrics() -> None:
         assert server._server is not None
         port = server._server.server_address[1]
         with urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as response:
-            assert json.loads(response.read()) == {"database": "ok", "ok": True}
+            assert json.loads(response.read()) == {
+                "database": "ok",
+                "ok": True,
+                "webhook_wedged": False,
+            }
         with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
             body = response.read().decode()
             assert "miki_posts_available 2" in body
             assert 'miki_jobs{state="pending"} 3' in body
             assert "miki_metric_telegram_retries 5" in body
+    finally:
+        server.stop()
+
+
+def test_health_server_flags_webhook_wedged() -> None:
+    base_status = {
+        "database": "ok",
+        "foreign_keys": True,
+        "posts": 0,
+        "unavailable_posts": 0,
+        "unresolved_dead_letters": 0,
+        "jobs": {},
+        "deliveries": {},
+        "metrics": {},
+    }
+    webhook = {
+        "enabled": True,
+        "healthy": False,
+        "wedged": True,
+        "url_matches": False,
+        "pending_update_count": 12,
+        "seconds_since_update": 1800,
+        "reconciliations": 4,
+        "breaker_state": "open",
+        "last_error_age_seconds": 30,
+    }
+    server = HealthServer(
+        host="127.0.0.1",
+        port=0,
+        status_provider=lambda: {**base_status, "webhook": webhook},
+    )
+    server.start()
+    try:
+        port = server._server.server_address[1]
+        with pytest.raises(HTTPError) as raised:
+            urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5)
+        assert raised.value.code == 503
+        assert json.loads(raised.value.read())["webhook_wedged"] is True
+        with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+            body = response.read().decode()
+            assert "miki_webhook_wedged 1" in body
+            assert "miki_webhook_pending_updates 12" in body
+            assert "miki_webhook_breaker_open 1" in body
+            assert "miki_webhook_url_matches 0" in body
     finally:
         server.stop()
 

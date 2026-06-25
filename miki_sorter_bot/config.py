@@ -139,6 +139,35 @@ class Settings(BaseSettings):
     webhook_path: str = Field(default="/telegram/webhook", alias="WEBHOOK_PATH")
     webhook_secret_token: str = Field(default="", alias="WEBHOOK_SECRET_TOKEN")
     webhook_max_connections: int = Field(default=40, ge=1, le=100, alias="WEBHOOK_MAX_CONNECTIONS")
+    webhook_reconcile_enabled: bool = Field(
+        default=True,
+        alias="WEBHOOK_RECONCILE_ENABLED",
+    )
+    webhook_reconcile_interval_seconds: int = Field(
+        default=120,
+        ge=15,
+        alias="WEBHOOK_RECONCILE_INTERVAL_SECONDS",
+    )
+    webhook_stale_after_seconds: int = Field(
+        default=900,
+        ge=60,
+        alias="WEBHOOK_STALE_AFTER_SECONDS",
+    )
+    webhook_pending_alert_threshold: int = Field(
+        default=50,
+        ge=1,
+        alias="WEBHOOK_PENDING_ALERT_THRESHOLD",
+    )
+    webhook_heal_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        alias="WEBHOOK_HEAL_FAILURE_THRESHOLD",
+    )
+    webhook_heal_reset_seconds: int = Field(
+        default=300,
+        ge=30,
+        alias="WEBHOOK_HEAL_RESET_SECONDS",
+    )
     health_server_enabled: bool = Field(default=False, alias="HEALTH_SERVER_ENABLED")
     health_listen: str = Field(default="127.0.0.1", alias="HEALTH_LISTEN")
     health_port: int = Field(default=8081, ge=1, le=65535, alias="HEALTH_PORT")

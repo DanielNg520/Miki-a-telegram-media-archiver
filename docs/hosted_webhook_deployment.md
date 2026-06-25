@@ -34,6 +34,41 @@ SOURCE_ACTIVITY_CHECK_ENABLED=true
 ERROR_REPORTING_DSN=
 ```
 
+## Webhook self-healing
+
+In webhook mode Miki supervises its own Telegram registration so it stays healthy
+without manual intervention. A background reconcile loop runs every
+`WEBHOOK_RECONCILE_INTERVAL_SECONDS` (default 120s):
+
+1. **Observe** — reads Telegram's live `getWebhookInfo`.
+2. **Detect drift** — registered URL missing/mismatched, a pending-update backlog
+   (`WEBHOOK_PENDING_ALERT_THRESHOLD`), recent delivery errors, or a stale liveness
+   heartbeat corroborated by a Telegram-side symptom.
+3. **Heal** — re-runs `setWebhook` toward the desired state. A circuit breaker
+   (`WEBHOOK_HEAL_FAILURE_THRESHOLD` / `WEBHOOK_HEAL_RESET_SECONDS`) prevents flapping
+   when the underlying cause (DNS, cert, routing) is not yet fixed.
+
+This recovers automatically from the common webhook failure modes — a cert renewal,
+a reverse-proxy restart, brief downtime, or another process overwriting the webhook —
+which would otherwise silently stop delivery until someone re-ran `setWebhook`.
+
+Tuning knobs (all optional, sane defaults):
+
+```env
+WEBHOOK_RECONCILE_ENABLED=true
+WEBHOOK_RECONCILE_INTERVAL_SECONDS=120
+WEBHOOK_STALE_AFTER_SECONDS=900
+WEBHOOK_PENDING_ALERT_THRESHOLD=50
+WEBHOOK_HEAL_FAILURE_THRESHOLD=3
+WEBHOOK_HEAL_RESET_SECONDS=300
+```
+
+Observe it via `/doctor` and `/status` in Telegram (both print a "Webhook supervision"
+section) or the `/metrics` endpoint (`miki_webhook_*` gauges). `/healthz` reports the
+process as unhealthy **only when the webhook is confidently wedged** (breaker open and
+updates stale), which a container `HEALTHCHECK` + `restart: unless-stopped` uses as a
+last-resort restart trigger without false positives during quiet periods.
+
 To send exceptions to Sentry-compatible reporting, install with:
 
 ```bash
