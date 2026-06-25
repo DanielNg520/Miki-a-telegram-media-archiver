@@ -63,53 +63,65 @@ miki-show-ids                  # confirm chat/thread IDs
 Keep `SORT_DRY_RUN=true` until logs show it picking up the right messages, then set `false`.
 
 ## Optional: self-healing webhook mode on the droplet
-Polling above stays the simplest path. If you instead want webhook mode (e.g. to
-share Observer's Nginx + 443 and avoid long-polling), Miki now **supervises its own
-webhook registration** so it stays low-maintenance:
+Polling above stays the simplest path. If you want webhook mode (a public HTTPS host
++ a reverse proxy on the droplet), Miki **supervises its own webhook registration** so
+it stays low-maintenance:
 
 - A reconcile loop (every `WEBHOOK_RECONCILE_INTERVAL_SECONDS`, default 120s) compares
   Telegram's live `getWebhookInfo` against the desired registration and re-runs
-  `setWebhook` when the URL drifts, a backlog builds, or Telegram reports delivery
-  errors — recovering from cert blips, Nginx restarts, or a lost webhook on its own.
-- A circuit breaker guards the self-heal so it never flaps or hammers the Bot API.
+  `setWebhook` when the URL is lost/wrong or Telegram reports delivery errors —
+  recovering from cert blips, proxy restarts, or a dropped webhook on its own.
+- A circuit breaker **backs off** if a re-registration doesn't actually fix the drift
+  (e.g. the proxy is misconfigured), so it can never spin "self-healing" every tick.
 - The container `HEALTHCHECK` is the last-resort backstop: it probes `/healthz` and,
-  combined with `restart: unless-stopped`, restarts only a *confidently wedged* process
+  with `--restart unless-stopped`, restarts only a *confidently wedged* process
   (breaker open **and** updates stale) — a quiet source never triggers a restart loop.
 
-Compose service (webhook variant):
-```yaml
-  miki:
-    build: ../miki_a_friendly_sorter_bot
-    restart: unless-stopped
-    env_file: ../miki_a_friendly_sorter_bot/.env   # RUN_MODE=webhook, WEBHOOK_URL=..., HEALTH_SERVER_ENABLED=true
-    expose:
-      - "8080"        # webhook port, reverse-proxied by Nginx (not published to the host)
-    volumes:
-      - ../miki_a_friendly_sorter_bot/var:/app/var
-    deploy:
-      resources:
-        limits:
-          memory: 150M
-```
+> ⚠️ **`--env-file` does not strip inline comments.** In `.env`, never write
+> `KEY=value   # note` — Docker keeps `value   # note` as the literal value and Miki
+> will fail to start. Put comments on their own lines.
 
-Required `.env` for webhook mode:
+### `.env` for webhook mode
 ```env
 RUN_MODE=webhook
-WEBHOOK_URL=https://your-host/telegram/webhook
+WEBHOOK_URL=https://miki.your-domain.com/telegram/webhook
 WEBHOOK_PATH=/telegram/webhook
 WEBHOOK_SECRET_TOKEN=long-random-secret
-HEALTH_SERVER_ENABLED=true     # enables the /healthz probe the HEALTHCHECK uses
+WEBHOOK_RECONCILE_ENABLED=true
+HEALTH_SERVER_ENABLED=true
 HEALTH_PORT=8081
 ```
 
-Nginx (share Observer's 443/TLS) — proxy the webhook path to the container:
-```nginx
-location /telegram/webhook {
-    proxy_pass http://miki:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
+### Run the container (publish the webhook port to localhost)
+The reverse proxy runs on the host, so publish Miki's port to `127.0.0.1` (not the
+public interface — the proxy terminates TLS and forwards inward):
+```bash
+docker run -d --name miki --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 \
+  --env-file /opt/miki/.env \
+  -v /opt/miki/var:/app/var \
+  miki
+docker port miki        # expect: 8080/tcp -> 127.0.0.1:8080
+```
+
+### Reverse proxy + TLS
+**Caddy** (recommended — automatic Let's Encrypt, whole config is two lines in
+`/etc/caddy/Caddyfile`):
+```caddy
+miki.your-domain.com {
+    reverse_proxy 127.0.0.1:8080
 }
 ```
-Telegram requires a valid HTTPS cert on `WEBHOOK_URL`; reuse the existing Let's Encrypt
-cert on Observer's Nginx. Watch self-healing with `curl -s localhost:8081/metrics | grep webhook`
-and `/doctor` in Telegram (it now prints a "Webhook supervision" section).
+Then `systemctl reload caddy`. (For nginx instead, a `server { listen 443 ssl; location
+/telegram/webhook { proxy_pass http://127.0.0.1:8080; } }` block with a certbot cert does
+the same job, but you manage the cert yourself.)
+
+### Verify
+```bash
+curl -sI http://127.0.0.1:8080/telegram/webhook         # 405 = server reachable (good)
+TOKEN=$(grep -E '^BOT_TOKEN=' .env | cut -d= -f2- | tr -d "\"'")
+curl -s "https://api.telegram.org/bot${TOKEN}/getWebhookInfo" | python3 -m json.tool
+```
+Want `pending_update_count` near 0 and no fresh `last_error_message`. Watch self-healing
+via `/doctor` or `/status` in Telegram (both print a "Webhook supervision" section), or
+`curl -s localhost:8081/metrics | grep webhook`.

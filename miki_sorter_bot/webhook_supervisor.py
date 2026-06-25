@@ -234,10 +234,17 @@ class WebhookSupervisor:
         self._reconciliations = 0
         self._consecutive_heal_failures = 0
         self._last_outcome = "pending"
-        # Strategy list: each detector returns a drift reason or None.
+        # Drift reason of a heal awaiting effectiveness confirmation on the next
+        # tick. This is what stops the "self-heal every 2 minutes forever" spin:
+        # re-registering does not drain a backlog, so if the same drift survives a
+        # heal we treat it as a breaker failure and back off instead of retrying.
+        self._awaiting_confirmation: str | None = None
+        # Strategy list: each detector returns a drift reason or None. A pure
+        # pending backlog is intentionally NOT a trigger -- re-registering only
+        # re-floods it; only a lost/wrong URL or Telegram-reported errors warrant
+        # a re-registration.
         self._drift_detectors: Sequence[Callable[[WebhookInfo], str | None]] = (
             self._detect_url_drift,
-            self._detect_backlog,
             self._detect_active_errors,
             self._detect_stale_liveness,
         )
@@ -253,7 +260,11 @@ class WebhookSupervisor:
         drift: str | None = None
         if observed is not None:
             drift = self._detect_drift(observed)
-            if drift is None:
+            if self._awaiting_confirmation is not None:
+                # We re-registered last tick; judge whether it worked before
+                # doing anything else. Never heal again in the same tick.
+                self._confirm_previous_heal(drift)
+            elif drift is None:
                 self._last_outcome = "ok"
             elif self._breaker.allow():
                 await self._heal(drift)
@@ -264,6 +275,21 @@ class WebhookSupervisor:
             self._last_outcome = "observe_failed"
         self._snapshot = self._build_snapshot(observed=observed, drift=drift)
         return self._snapshot
+
+    def _confirm_previous_heal(self, drift: str | None) -> None:
+        """Grade the previous heal: drift gone => effective; still here => back off."""
+
+        if drift is None:
+            self._breaker.record_success()
+            self._consecutive_heal_failures = 0
+            self._increment_metric("webhook_heal_confirmed", 1)
+            self._last_outcome = "ok"
+        else:
+            self._breaker.record_failure()
+            self._consecutive_heal_failures += 1
+            self._increment_metric("webhook_heal_ineffective", 1)
+            self._last_outcome = f"backing_off:{drift}"
+        self._awaiting_confirmation = None
 
     async def _observe(self) -> WebhookInfo | None:
         try:
@@ -280,7 +306,14 @@ class WebhookSupervisor:
                 return reason
         return None
 
-    async def _heal(self, reason: str) -> bool:
+    async def _heal(self, reason: str) -> None:
+        """Re-register the webhook once. Effectiveness is graded next tick.
+
+        A successful API call does NOT reset the breaker -- only a confirmed
+        drift clearance does. That is what turns a persistent, unfixable problem
+        into exponential back-off instead of an endless every-tick re-register.
+        """
+
         try:
             await self._bot.set_webhook(
                 url=self._desired.url,
@@ -294,18 +327,16 @@ class WebhookSupervisor:
             self._consecutive_heal_failures += 1
             self._increment_metric("webhook_reconcile_failures", 1)
             self._last_outcome = f"heal_failed:{reason}"
-            LOGGER.warning("Webhook self-heal failed (%s): %s", reason, error)
-            return False
-        self._breaker.record_success()
-        self._consecutive_heal_failures = 0
+            LOGGER.warning("Webhook re-registration call failed (%s): %s", reason, error)
+            return
         self._reconciliations += 1
+        self._awaiting_confirmation = reason
         self._increment_metric("webhook_reconciliations", 1)
-        self._last_outcome = f"healed:{reason}"
+        self._last_outcome = f"healing:{reason}"
         LOGGER.info(
-            "Webhook self-healed",
+            "Webhook re-registered; awaiting confirmation",
             extra={"reason": reason, "url": self._desired.url},
         )
-        return True
 
     # -- drift detectors (strategies) -----------------------------------
     def _detect_url_drift(self, observed: WebhookInfo) -> str | None:
@@ -314,12 +345,6 @@ class WebhookSupervisor:
             return "url_unset"
         if registered != self._desired.url:
             return "url_mismatch"
-        return None
-
-    def _detect_backlog(self, observed: WebhookInfo) -> str | None:
-        pending = observed.pending_update_count or 0
-        if pending >= self._settings.webhook_pending_alert_threshold:
-            return "pending_backlog"
         return None
 
     def _detect_active_errors(self, observed: WebhookInfo) -> str | None:
@@ -368,7 +393,9 @@ class WebhookSupervisor:
             breaker_state is BreakerState.OPEN
             and seconds_since > self._settings.webhook_stale_after_seconds
         )
-        healthy = not wedged and (drift is None or self._last_outcome.startswith("healed"))
+        healthy = not wedged and not self._last_outcome.startswith(
+            ("suppressed", "heal_failed", "backing_off")
+        )
         return WebhookHealth(
             mode="webhook",
             enabled=True,

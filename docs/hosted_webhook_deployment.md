@@ -41,12 +41,15 @@ without manual intervention. A background reconcile loop runs every
 `WEBHOOK_RECONCILE_INTERVAL_SECONDS` (default 120s):
 
 1. **Observe** — reads Telegram's live `getWebhookInfo`.
-2. **Detect drift** — registered URL missing/mismatched, a pending-update backlog
-   (`WEBHOOK_PENDING_ALERT_THRESHOLD`), recent delivery errors, or a stale liveness
-   heartbeat corroborated by a Telegram-side symptom.
-3. **Heal** — re-runs `setWebhook` toward the desired state. A circuit breaker
-   (`WEBHOOK_HEAL_FAILURE_THRESHOLD` / `WEBHOOK_HEAL_RESET_SECONDS`) prevents flapping
-   when the underlying cause (DNS, cert, routing) is not yet fixed.
+2. **Detect drift** — registered URL missing/mismatched, recent delivery errors, or a
+   stale liveness heartbeat corroborated by a Telegram-side symptom. A pending-update
+   backlog is deliberately *not* a trigger: re-registering does not drain a backlog,
+   it only re-floods it.
+3. **Heal, then confirm** — re-runs `setWebhook` toward the desired state, then on the
+   next tick checks whether the drift actually cleared. If it did not (e.g. the proxy
+   is still misconfigured), that counts as a circuit-breaker failure
+   (`WEBHOOK_HEAL_FAILURE_THRESHOLD` / `WEBHOOK_HEAL_RESET_SECONDS`), so repeated
+   ineffective heals **back off and stop** instead of re-registering every tick.
 
 This recovers automatically from the common webhook failure modes — a cert renewal,
 a reverse-proxy restart, brief downtime, or another process overwriting the webhook —
@@ -58,7 +61,6 @@ Tuning knobs (all optional, sane defaults):
 WEBHOOK_RECONCILE_ENABLED=true
 WEBHOOK_RECONCILE_INTERVAL_SECONDS=120
 WEBHOOK_STALE_AFTER_SECONDS=900
-WEBHOOK_PENDING_ALERT_THRESHOLD=50
 WEBHOOK_HEAL_FAILURE_THRESHOLD=3
 WEBHOOK_HEAL_RESET_SECONDS=300
 ```

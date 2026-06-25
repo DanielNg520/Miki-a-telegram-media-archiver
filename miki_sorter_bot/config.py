@@ -153,11 +153,6 @@ class Settings(BaseSettings):
         ge=60,
         alias="WEBHOOK_STALE_AFTER_SECONDS",
     )
-    webhook_pending_alert_threshold: int = Field(
-        default=50,
-        ge=1,
-        alias="WEBHOOK_PENDING_ALERT_THRESHOLD",
-    )
     webhook_heal_failure_threshold: int = Field(
         default=3,
         ge=1,
