@@ -27,8 +27,10 @@ from miki_sorter_bot.indexing import (
     contains_phrase,
     media_type,
 )
+from miki_sorter_bot.lookback import CapturedMedia, RecentMediaBuffer
 from miki_sorter_bot.repositories import RouteMappingRecord, SqliteRepositories, TopicRecord
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
+from miki_sorter_bot.settings_registry import LiveSettings
 
 LOGGER = logging.getLogger(__name__)
 HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
@@ -109,6 +111,7 @@ class SortingService:
         repositories: SqliteRepositories,
         indexing: IndexingService,
         delivery_executor: DeliveryExecutor | None = None,
+        live_settings: LiveSettings | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -117,6 +120,8 @@ class SortingService:
             retry_policy=RetryPolicy(),
             rate_limiter=RateLimiter(1000),
         )
+        # Effective (chat-configurable) values are resolved live on each read.
+        self._live = live_settings or LiveSettings(settings, repositories)
         self._matcher = RouteMatcher(repositories, settings.archive_chat_id)
         self._album_decisions: OrderedDict[tuple[int, str], SortDecision] = OrderedDict()
         self._album_source_threads: OrderedDict[tuple[int, str], int] = OrderedDict()
@@ -128,8 +133,12 @@ class SortingService:
         # POSTs, so stragglers past the flush delay are common; polling batches
         # them so the race never triggers).
         self._delivering_albums: set[tuple[int, str]] = set()
-        self._album_flush_delay = getattr(settings, "album_flush_delay_seconds", 5.0)
-        self._album_max_wait = getattr(settings, "album_max_wait_seconds", 30.0)
+        # Short-lived memory of uncaptioned media so a following hashtag-only
+        # message can route "the post before it" (look-back feature).
+        self._lookback = RecentMediaBuffer(
+            ttl=self._live.lookback_ttl,
+            capacity=self._live.lookback_capacity,
+        )
         self._suspend_album_reschedule = False
         # Reconcile env-configured forwarding pairs into the database once, so
         # the DB is the live source of truth and pairs become manageable via
@@ -201,6 +210,9 @@ class SortingService:
             return
         detected_media_type = media_type(message)
         if detected_media_type is None:
+            # Not media. It may be a hashtag-only message tagging media that was
+            # posted just before it without a caption (look-back feature).
+            await self._maybe_route_from_lookback(message, chat, context)
             return
         media_group_id = getattr(message, "media_group_id", None)
         album_key = (chat.id, media_group_id) if media_group_id else None
@@ -263,6 +275,10 @@ class SortingService:
             await self._deliver(message, chat.id, direct_decision, context)
             return
         if not text:
+            # Uncaptioned media in the source topic: remember it briefly so a
+            # following hashtag-only message can still route it.
+            if self._live.lookback_enabled():
+                self._lookback.capture(chat.id, source_thread_id, (message,))
             return
         decision = self._matcher.decide(text)
         if decision.status == "unmatched":
@@ -275,6 +291,91 @@ class SortingService:
             )
             return
         await self._deliver(message, chat.id, decision, context)
+
+    async def _maybe_route_from_lookback(
+        self,
+        message: Any,
+        chat: Any,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """A hashtag-only message can route the uncaptioned media just before it."""
+
+        if not self._live.lookback_enabled():
+            return
+        text = (getattr(message, "text", None) or "").strip()
+        if not text:
+            return
+        source_thread_id = getattr(message, "message_thread_id", None)
+        # Look-back mirrors the primary sort source only (forwarding pairs deliver
+        # uncaptioned media immediately, so nothing is ever buffered for them).
+        is_primary_source = (
+            chat.id == self._settings.source_chat_id
+            and source_thread_id == self._effective_source_thread_id()
+        )
+        if not is_primary_source:
+            return
+        sender = getattr(message, "from_user", None)
+        if getattr(sender, "id", None) == context.bot.id:
+            return
+        decision = self._matcher.decide(text)
+        if decision.status != "matched":
+            return
+        # 1) Quick tag: an album posted seconds ago is still assembling/awaiting a
+        #    route. Hand it this decision and let its existing flush deliver it.
+        if self._attach_decision_to_pending_album(chat.id, source_thread_id, decision):
+            return
+        # 2) Otherwise claim the most recent buffered media and deliver it now.
+        captured = self._lookback.claim_latest(chat.id, source_thread_id)
+        if captured is None:
+            return
+        LOGGER.info(
+            "Routing look-back media from a following hashtag",
+            extra={
+                "source_chat_id": chat.id,
+                "message_count": len(captured.messages),
+                "media_group_id": captured.media_group_id,
+                "destination_thread_id": decision.topic.thread_id
+                if decision.topic is not None
+                else None,
+            },
+        )
+        await self._deliver_captured(captured, chat.id, decision, context)
+
+    def _attach_decision_to_pending_album(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        decision: SortDecision,
+    ) -> bool:
+        candidates = [
+            (pending.first_seen_at, key)
+            for key, pending in self._pending_albums.items()
+            if key[0] == chat_id
+            and pending.decision is None
+            and self._album_source_threads.get(key) == thread_id
+        ]
+        if not candidates:
+            return False
+        candidates.sort()
+        _, key = candidates[-1]  # most recent undecided album in this topic
+        self._pending_albums[key].decision = decision
+        self._remember_album_decision(key, decision)
+        return True
+
+    async def _deliver_captured(
+        self,
+        captured: CapturedMedia,
+        source_chat_id: int,
+        decision: SortDecision,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await self._deliver_album_messages(
+            captured.messages,
+            source_chat_id,
+            decision,
+            captured.media_group_id,
+            context,
+        )
 
     def _remember_album_decision(
         self,
@@ -332,7 +433,7 @@ class SortingService:
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         try:
-            await asyncio.sleep(self._album_flush_delay)
+            await asyncio.sleep(self._live.album_flush_delay())
             # No await between here and the delivery's first await, so marking the
             # key now reliably protects the in-flight send from a straggler cancel.
             self._delivering_albums.add(key)
@@ -386,7 +487,7 @@ class SortingService:
         if pending.decision is None:
             pending.decision = self._decide_album_text(pending)
         if pending.decision is None:
-            if time.monotonic() - pending.first_seen_at < self._album_max_wait:
+            if time.monotonic() - pending.first_seen_at < self._live.album_max_wait():
                 self._pending_albums[key] = pending
                 LOGGER.info(
                     "Album is waiting for a route decision",
@@ -398,15 +499,7 @@ class SortingService:
                     },
                 )
                 return
-            LOGGER.info(
-                "Dropping unrouted album after decision wait expired",
-                extra={
-                    "source_chat_id": pending.source_chat_id,
-                    "media_group_id": key[1],
-                    "message_count": len(pending.messages),
-                    "caption_count": _album_caption_count(tuple(pending.messages.values())),
-                },
-            )
+            self._buffer_unrouted_album(key, pending)
             return
         messages = tuple(
             message for _, message in sorted(pending.messages.items(), key=lambda item: item[0])
@@ -422,13 +515,64 @@ class SortingService:
                 else None,
             },
         )
-        if len(messages) == 1:
-            await self._deliver(messages[0], pending.source_chat_id, pending.decision, context)
-            return
-        group_outcome = await self._deliver_media_group(
+        await self._deliver_album_messages(
             messages,
             pending.source_chat_id,
             pending.decision,
+            key[1],
+            context,
+        )
+
+    def _buffer_unrouted_album(self, key: tuple[int, str], pending: PendingAlbum) -> None:
+        """An album nobody routed within the wait window: hand it to look-back
+        (so a later hashtag can still claim it) instead of dropping it."""
+
+        messages = tuple(
+            message for _, message in sorted(pending.messages.items(), key=lambda item: item[0])
+        )
+        if self._live.lookback_enabled():
+            self._lookback.capture(
+                pending.source_chat_id,
+                self._album_source_threads.get(key),
+                messages,
+                media_group_id=key[1],
+            )
+            LOGGER.info(
+                "Buffered unrouted album for hashtag look-back",
+                extra={
+                    "source_chat_id": pending.source_chat_id,
+                    "media_group_id": key[1],
+                    "message_count": len(messages),
+                },
+            )
+            return
+        LOGGER.info(
+            "Dropping unrouted album after decision wait expired",
+            extra={
+                "source_chat_id": pending.source_chat_id,
+                "media_group_id": key[1],
+                "message_count": len(messages),
+            },
+        )
+
+    async def _deliver_album_messages(
+        self,
+        messages: tuple[Any, ...],
+        source_chat_id: int,
+        decision: SortDecision,
+        media_group_id: str | None,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Deliver an assembled, decided album as a group, with a per-member
+        fallback. Shared by the album flush path and look-back delivery."""
+
+        if len(messages) == 1:
+            await self._deliver(messages[0], source_chat_id, decision, context)
+            return
+        group_outcome = await self._deliver_media_group(
+            messages,
+            source_chat_id,
+            decision,
             context,
         )
         if group_outcome is not AlbumDeliveryOutcome.SAFE_FALLBACK:
@@ -436,16 +580,16 @@ class SortingService:
         failed_count = 0
         for message in messages:
             try:
-                await self._deliver(message, pending.source_chat_id, pending.decision, context)
+                await self._deliver(message, source_chat_id, decision, context)
             except Exception as error:
                 failed_count += 1
                 failure = classify_error(error)
                 LOGGER.warning(
                     "Individual album member delivery failed; continuing album",
                     extra={
-                        "source_chat_id": pending.source_chat_id,
+                        "source_chat_id": source_chat_id,
                         "source_message_id": getattr(message, "message_id", None),
-                        "media_group_id": key[1],
+                        "media_group_id": media_group_id,
                         "error_category": failure.category,
                     },
                 )
@@ -457,8 +601,8 @@ class SortingService:
             LOGGER.warning(
                 "Album fallback completed with failed members",
                 extra={
-                    "source_chat_id": pending.source_chat_id,
-                    "media_group_id": key[1],
+                    "source_chat_id": source_chat_id,
+                    "media_group_id": media_group_id,
                     "failed_count": failed_count,
                     "message_count": len(messages),
                 },
@@ -522,7 +666,7 @@ class SortingService:
         if not self._repositories.claim_job(job.id):
             self._repositories.increment_metric("sort_duplicates", 1)
             return
-        if self._settings.sort_dry_run:
+        if self._live.sort_dry_run():
             self._repositories.update_delivery(delivery.id, "skipped", reason="dry-run")
             self._repositories.update_job(job.id, "completed")
             return
@@ -570,7 +714,7 @@ class SortingService:
             destination_thread_id=topic.thread_id,
             destination_message_id=copied.message_id,
         )
-        if self._settings.send_confirmation:
+        if self._live.send_confirmation():
             await message.reply_text(f"Sorted to {topic.name}.", quote=True)
 
     def _decide_album_text(self, pending: PendingAlbum) -> SortDecision | None:
@@ -639,7 +783,7 @@ class SortingService:
             if not self._repositories.claim_job(job.id):
                 completed_count += 1
                 continue
-            if self._settings.sort_dry_run:
+            if self._live.sort_dry_run():
                 self._repositories.update_delivery(delivery.id, "skipped", reason="dry-run")
                 self._repositories.update_job(job.id, "completed")
                 continue
@@ -664,7 +808,7 @@ class SortingService:
             return AlbumDeliveryOutcome.SAFE_FALLBACK
         if completed_count:
             self._repositories.increment_metric("sort_duplicates", completed_count)
-        if not deliveries or self._settings.sort_dry_run:
+        if not deliveries or self._live.sort_dry_run():
             return AlbumDeliveryOutcome.DELIVERED
 
         try:
@@ -786,7 +930,7 @@ class SortingService:
                 len(deliveries) - len(sent_ids),
             )
             return AlbumDeliveryOutcome.OUTCOME_UNKNOWN
-        if self._settings.send_confirmation:
+        if self._live.send_confirmation():
             await messages[0].reply_text(f"Sorted to {topic.name}.", quote=True)
         return AlbumDeliveryOutcome.DELIVERED
 

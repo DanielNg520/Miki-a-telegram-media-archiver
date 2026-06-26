@@ -84,6 +84,19 @@ class Settings(BaseSettings):
         le=300.0,
         alias="ALBUM_MAX_WAIT_SECONDS",
     )
+    lookback_enabled: bool = Field(default=True, alias="LOOKBACK_ENABLED")
+    lookback_ttl_seconds: float = Field(
+        default=120.0,
+        ge=5.0,
+        le=3600.0,
+        alias="LOOKBACK_TTL_SECONDS",
+    )
+    lookback_capacity: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        alias="LOOKBACK_CAPACITY",
+    )
     telegram_retry_attempts: int = Field(default=3, ge=1, le=10, alias="TELEGRAM_RETRY_ATTEMPTS")
     telegram_retry_base_delay: float = Field(default=0.5, ge=0, alias="TELEGRAM_RETRY_BASE_DELAY")
     telegram_retry_max_delay: float = Field(default=8.0, ge=0, alias="TELEGRAM_RETRY_MAX_DELAY")

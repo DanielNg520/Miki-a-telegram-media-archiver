@@ -171,6 +171,10 @@ class RuntimeConfigRepository(Protocol):
         updated_by_user_id: int | None = None,
     ) -> None: ...
 
+    def delete_runtime_setting(self, key: str) -> bool: ...
+
+    def list_runtime_settings(self) -> dict[str, str]: ...
+
     def get_forwarding_destination(self, source_thread_id: int) -> int | None: ...
 
     def list_forwarding_pairs(self) -> list[ForwardingPairRecord]: ...
@@ -563,6 +567,22 @@ class SqliteRepositories:
                 """,
                 (key, value, updated_by_user_id),
             )
+
+    def delete_runtime_setting(self, key: str) -> bool:
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM runtime_settings WHERE key = ?",
+                (key,),
+            )
+        return cursor.rowcount > 0
+
+    def list_runtime_settings(self) -> dict[str, str]:
+        return {
+            row["key"]: row["value"]
+            for row in self._connection.execute(
+                "SELECT key, value FROM runtime_settings ORDER BY key"
+            )
+        }
 
     def get_forwarding_destination(self, source_thread_id: int) -> int | None:
         row = self._connection.execute(

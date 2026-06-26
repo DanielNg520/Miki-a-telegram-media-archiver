@@ -310,6 +310,9 @@ Bot requesters must also be listed in `REQUESTER_BOT_IDS`. Miki replies with a j
 | `/health` | Admin | `/health` | Reports overall health plus database and Telegram connectivity. |
 | `/status` | Admin | `/status` | Operational snapshot: posts, dead letters, job counts, retries/throttles, average delivery time. |
 | `/doctor` | Admin | `/doctor` | Human-readable configuration and connectivity diagnostics. |
+| `/config` | Admin | `/config` | Lists the runtime-tunable settings, their effective values, and which are overridden. |
+| `/set <key> <value>` | Super admin | `/set lookback_ttl_seconds 180` | Changes a setting at runtime, effective immediately (validated, no restart). |
+| `/reset <key>` | Super admin | `/reset lookback_ttl_seconds` | Clears a runtime override, reverting the setting to its `.env` default. |
 | `/maintenance` | Super admin | `/maintenance` | Prunes expired transient records and old audit events per retention settings. |
 | `/backup` | Super admin | `/backup` | Creates an on-demand verified database backup (in addition to the daily auto-backup). |
 | `/dead_letters` | Super admin | `/dead_letters` | Lists unresolved terminal failures (id, operation, error category, job). |
@@ -444,3 +447,20 @@ Miki ignores messages outside `SOURCE_THREAD_ID`, messages without media, and me
 text or a caption. It resolves registered hashtags, keywords, and phrases, persists the intended
 delivery, and copies the original message without downloading or re-uploading media. Messages
 without a match are left untouched; conflicting destinations are recorded without copying.
+
+### Hashtag look-back
+
+If media (a single item or an album) is posted in the source topic **without a caption** and a
+hashtag-only message follows it, Miki routes that recent media too — you don't have to caption at
+upload time. Because a bot cannot read history, this works only on media Miki already received: it
+remembers recent uncaptioned media in a small in-memory buffer that is both time-bounded
+(`LOOKBACK_TTL_SECONDS`) and count-bounded (`LOOKBACK_CAPACITY`) per topic, self-cleans on every
+access, and starts empty after a restart. Disable with `LOOKBACK_ENABLED=false` or `/set
+lookback_enabled false`.
+
+### Runtime configuration
+
+The sorting/delivery and look-back knobs are configurable from chat with no restart: `/config`
+lists them, `/set <key> <value>` changes one (validated), `/reset <key>` reverts to the `.env`
+default. A poisoned or out-of-range stored value is discarded automatically and falls back to the
+default rather than disrupting delivery.

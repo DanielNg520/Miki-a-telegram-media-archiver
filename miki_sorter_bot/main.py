@@ -32,6 +32,7 @@ from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.retrieval import RetrievalService
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy
+from miki_sorter_bot.settings_registry import LiveSettings
 from miki_sorter_bot.show_ids import show_ids
 from miki_sorter_bot.sorting import SortingService
 from miki_sorter_bot.storage import Storage
@@ -120,8 +121,15 @@ def _run(settings: Settings) -> None:
         rate_limiter=RateLimiter(settings.telegram_messages_per_second),
         metric=repositories.increment_metric,
     )
+    live_settings = LiveSettings(settings, repositories)
     indexing = IndexingService(settings, repositories)
-    sorting = SortingService(settings, repositories, indexing, delivery_executor)
+    sorting = SortingService(
+        settings,
+        repositories,
+        indexing,
+        delivery_executor,
+        live_settings=live_settings,
+    )
     retrieval = RetrievalService(settings, repositories, delivery_executor)
     recovery = JobRecoveryService(
         repositories,
@@ -144,6 +152,7 @@ def _run(settings: Settings) -> None:
         sorting,
         operations,
         recovery,
+        live_settings=live_settings,
     )
     heartbeat = Heartbeat()
 
@@ -505,6 +514,10 @@ def _add_management_handlers(
         "audit_log": management.audit_log,
         "health": management.health,
         "status": management.status,
+        "config": management.config_show,
+        "settings": management.config_show,
+        "set": management.config_set,
+        "reset": management.config_reset,
         "maintenance": management.maintenance,
         "backup": management.backup,
         "show_ids": show_ids,

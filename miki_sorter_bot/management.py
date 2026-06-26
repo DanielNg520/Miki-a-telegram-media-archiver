@@ -14,6 +14,7 @@ from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.repositories import SqliteRepositories, normalize_mapping
+from miki_sorter_bot.settings_registry import LiveSettings, UnknownSettingError
 from miki_sorter_bot.sorting import SortingService
 
 LOGGER = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class ManagementCommands:
         sorting: SortingService | None = None,
         operations: OperationsService | None = None,
         recovery: JobRecoveryService | None = None,
+        live_settings: LiveSettings | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -35,6 +37,7 @@ class ManagementCommands:
         self._sorting = sorting
         self._operations = operations
         self._recovery = recovery
+        self._live = live_settings or LiveSettings(settings, repositories)
 
     async def topic_register(
         self,
@@ -462,6 +465,71 @@ class ManagementCommands:
         if not snapshot.enabled:
             return ""
         return "\n\nWebhook supervision:\n" + "\n".join(snapshot.summary_lines())
+
+    async def config_show(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._authorized_context(update)
+        if command is None:
+            return
+        message, _, _ = command
+        views = self._live.registry.describe(self._live.settings, self._live.store)
+        lines = ["Runtime settings — change with /set <key> <value>, /reset <key>:"]
+        category = None
+        for view in views:
+            if view.category != category:
+                category = view.category
+                lines.append(f"\n[{category}]")
+            marker = "*" if view.overridden else " "
+            suffix = f"  (default {view.default})" if view.overridden else ""
+            lines.append(f"{marker} {view.key} = {view.value}{suffix}")
+        lines.append("\n* = overridden at runtime. Send /config for this list anytime.")
+        await message.reply_text("\n".join(lines))
+
+    async def config_set(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        parts = (message.text or "").split(maxsplit=2)
+        if len(parts) < 3:
+            await message.reply_text("Usage: /set <key> <value>  (see /config for keys)")
+            return
+        key, raw = parts[1], parts[2]
+        try:
+            value = self._live.registry.set(
+                key, raw, self._live.settings, self._live.store, user.id
+            )
+        except UnknownSettingError:
+            await message.reply_text(f"Unknown setting '{key}'. Send /config to list settings.")
+            return
+        except ValueError as error:
+            await message.reply_text(f"Invalid value for {key}: {error}")
+            return
+        rendered = self._live.registry.require(key).render(value)
+        await message.reply_text(f"{key} = {rendered} (effective immediately, no restart).")
+        self._audit(user.id, "config.set", "runtime_setting", key)
+
+    async def config_reset(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply_text("Usage: /reset <key>  (see /config for keys)")
+            return
+        key = parts[1].strip()
+        try:
+            spec = self._live.registry.require(key)
+            removed = self._live.registry.reset(key, self._live.store)
+        except UnknownSettingError:
+            await message.reply_text(f"Unknown setting '{key}'. Send /config to list settings.")
+            return
+        default = spec.render(spec.default(self._live.settings))
+        if removed:
+            await message.reply_text(f"{key} reset to default {default}.")
+        else:
+            await message.reply_text(f"{key} was already at its default ({default}).")
+        self._audit(user.id, "config.reset", "runtime_setting", key)
 
     async def maintenance(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._admin_context(update)

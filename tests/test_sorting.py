@@ -1544,3 +1544,250 @@ def test_background_album_flush_consumes_delivery_failures(database_connection) 
 
     assert repositories.get_delivery(-100, 12, -200, 9).status == "failed"
     assert repositories.metrics_snapshot()["album_flush_failures"] == 1
+
+
+# --- look-back: route media from a following hashtag-only message ----------
+def _text_message(
+    text: str,
+    *,
+    message_id: int = 13,
+    sender_id: int = 10,
+    thread_id: int | None = 5,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        message_id=message_id,
+        message_thread_id=thread_id,
+        text=text,
+        caption=None,
+        from_user=SimpleNamespace(id=sender_id, is_bot=False),
+        reply_text=AsyncMock(),
+    )
+
+
+def _lookback_service(repositories: SqliteRepositories) -> SortingService:
+    _routes(repositories)
+    return SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+
+
+def _photo_bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=90)),
+        send_media_group=AsyncMock(
+            return_value=[SimpleNamespace(message_id=90), SimpleNamespace(message_id=91)]
+        ),
+        copy_messages=AsyncMock(),
+    )
+
+
+def test_lookback_routes_single_uncaptioned_media_from_following_hashtag(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(effective_message=_message("", message_id=12), effective_chat=chat),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=13), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+
+
+def test_lookback_attaches_decision_to_pending_album(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        for mid in (12, 13):
+            await service.handle_update(
+                SimpleNamespace(
+                    effective_message=_message("", message_id=mid, media_group_id="albX"),
+                    effective_chat=chat,
+                ),
+                context,
+            )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=20), effective_chat=chat
+            ),
+            context,
+        )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run())
+
+    bot.send_media_group.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+    assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
+
+
+def test_lookback_delivers_buffered_album(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+    members = (
+        _message("", message_id=12, media_group_id="albY"),
+        _message("", message_id=13, media_group_id="albY"),
+    )
+    service._lookback.capture(-100, 5, members, media_group_id="albY")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=20), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.send_media_group.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+    assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
+
+
+def test_lookback_ignores_hashtag_without_buffered_media(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    asyncio.run(
+        service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=13), effective_chat=chat
+            ),
+            context,
+        )
+    )
+
+    bot.copy_message.assert_not_awaited()
+    bot.send_media_group.assert_not_awaited()
+
+
+def test_lookback_ignores_hashtag_in_non_source_thread(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(effective_message=_message("", message_id=12), effective_chat=chat),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=13, thread_id=999),
+                effective_chat=chat,
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_not_awaited()
+
+
+def test_lookback_disabled_does_not_buffer(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.set_runtime_setting("lookback_enabled", "false")
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(effective_message=_message("", message_id=12), effective_chat=chat),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=13), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_not_awaited()
+    assert len(service._lookback) == 0
+
+
+def test_lookback_unmatched_hashtag_leaves_media_for_later(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(effective_message=_message("", message_id=12), effective_chat=chat),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Nope", message_id=13), effective_chat=chat
+            ),
+            context,
+        )
+        bot.copy_message.assert_not_awaited()  # unmatched tag does nothing
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=14), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+
+
+def test_runtime_dry_run_override_skips_delivery(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.set_runtime_setting("sort_dry_run", "true")
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    asyncio.run(
+        service.handle_update(
+            SimpleNamespace(
+                effective_message=_message("#Japan", message_id=12), effective_chat=chat
+            ),
+            context,
+        )
+    )
+
+    bot.copy_message.assert_not_awaited()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "skipped"

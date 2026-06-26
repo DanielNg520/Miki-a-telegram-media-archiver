@@ -266,3 +266,74 @@ def test_admin_can_run_human_readable_doctor(database_connection) -> None:
     reply = update.effective_message.reply_text.await_args.args[0]
     assert "Miki checkup" in reply
     assert "Result: Miki is ready" in reply
+
+
+# --- chat-configurable runtime settings (/config, /set, /reset) ------------
+def test_admin_sets_runtime_setting_from_chat(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/set lookback_ttl_seconds 300")
+
+    asyncio.run(commands.config_set(update, SimpleNamespace()))
+
+    assert repositories.get_runtime_setting("lookback_ttl_seconds") == "300"
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "lookback_ttl_seconds = 300" in reply
+
+
+def test_set_rejects_out_of_range_value(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/set lookback_ttl_seconds 999999")
+
+    asyncio.run(commands.config_set(update, SimpleNamespace()))
+
+    assert repositories.get_runtime_setting("lookback_ttl_seconds") is None
+    assert "Invalid value" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_set_unknown_key_is_rejected(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/set bot_token hunter2")
+
+    asyncio.run(commands.config_set(update, SimpleNamespace()))
+
+    assert repositories.get_runtime_setting("bot_token") is None
+    assert "Unknown setting" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_non_admin_cannot_set_runtime_setting(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/set lookback_ttl_seconds 300", user_id=99)
+
+    asyncio.run(commands.config_set(update, SimpleNamespace()))
+
+    assert repositories.get_runtime_setting("lookback_ttl_seconds") is None
+
+
+def test_config_show_lists_registered_settings(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.set_runtime_setting("lookback_capacity", "9")
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/config")
+
+    asyncio.run(commands.config_show(update, SimpleNamespace()))
+
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "album_flush_delay_seconds" in reply
+    assert "[lookback]" in reply
+    assert "* lookback_capacity = 9" in reply  # marked as overridden
+
+
+def test_reset_clears_runtime_override(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.set_runtime_setting("sort_dry_run", "true")
+    commands = ManagementCommands(_settings(10), repositories)
+    update = _update("/reset sort_dry_run")
+
+    asyncio.run(commands.config_reset(update, SimpleNamespace()))
+
+    assert repositories.get_runtime_setting("sort_dry_run") is None
+    assert "reset to default" in update.effective_message.reply_text.await_args.args[0]
