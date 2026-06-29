@@ -487,6 +487,14 @@ class SortingService:
         if pending.decision is None:
             pending.decision = self._decide_album_text(pending)
         if pending.decision is None:
+            # A late or uncaptioned member can land in its own pending album when
+            # the captioned sibling already flushed (webhook delivers members as
+            # separate, staggered POSTs). Inherit the decision remembered for this
+            # media_group so the straggler is routed instead of dropped.
+            remembered = self._album_decisions.get(key)
+            if remembered is not None:
+                pending.decision = remembered
+        if pending.decision is None:
             if time.monotonic() - pending.first_seen_at < self._live.album_max_wait():
                 self._pending_albums[key] = pending
                 LOGGER.info(

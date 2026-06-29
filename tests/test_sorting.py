@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -9,7 +11,7 @@ from telegram.error import BadRequest, NetworkError, TimedOut
 
 from miki_sorter_bot.config import TopicForwardingPair
 from miki_sorter_bot.repositories import SqliteRepositories
-from miki_sorter_bot.sorting import RouteMatcher, SortingService
+from miki_sorter_bot.sorting import PendingAlbum, RouteMatcher, SortingService
 
 
 def _settings(
@@ -497,9 +499,7 @@ def test_straggling_album_member_does_not_cancel_in_flight_delivery(
         # Straggler lands while the grouped send is mid-flight.
         await service.handle_update(
             SimpleNamespace(
-                effective_message=_message(
-                    "", message_id=14, media_group_id="album-1"
-                ),
+                effective_message=_message("", message_id=14, media_group_id="album-1"),
                 effective_chat=chat,
             ),
             context,
@@ -868,6 +868,46 @@ def test_album_members_wait_for_later_caption_decision(database_connection) -> N
     bot.copy_messages.assert_not_awaited()
     assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
     assert repositories.get_delivery(-100, 13, -200, 9).status == "sent"
+
+
+def test_undecided_album_member_inherits_remembered_group_decision(
+    database_connection,
+) -> None:
+    """An uncaptioned member orphaned in its own pending album (the captioned
+    sibling already flushed) must inherit the decision remembered for its
+    media_group and be delivered, not dropped after the wait window."""
+
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(
+        _settings(),
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=90)),
+        send_media_group=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    key = (-100, "album-orphan")
+    # The captioned sibling was processed earlier and recorded this decision.
+    decision = service._matcher.decide("#Japan")
+    service._remember_album_decision(key, decision)
+    # The captionless straggler sits alone, undecided, with no text of its own.
+    service._pending_albums[key] = PendingAlbum(
+        -100,
+        None,
+        OrderedDict({12: _message("", message_id=12, media_group_id="album-orphan")}),
+        time.monotonic(),
+    )
+
+    asyncio.run(service.flush_pending_albums(context))
+
+    bot.copy_message.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
 
 
 def test_unmatched_caption_album_member_waits_for_later_route(database_connection) -> None:
