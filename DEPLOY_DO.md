@@ -3,14 +3,15 @@
 Brief plan for running miki on the **shared $4 droplet** alongside `PresenseObserver`.
 miki is a tiny stateless Python container — it rides along on the box for $0 extra.
 
-## Key decision: polling, not webhook
-On a VPS, **`RUN_MODE=polling` is the right choice** (see `.env.sample`):
-- No inbound port, no Nginx route, no public webhook URL, no TLS cert for the bot.
-- The bot dials out to Telegram — works behind any firewall.
-- The existing `render.yaml` uses webhook because Render is HTTP-only; **ignore it here**.
+## Run mode: webhook
+The droplet runs **`RUN_MODE=webhook`** behind a host reverse proxy (Caddy/nginx) that
+terminates TLS and forwards inward. Webhook gives Telegram-batched album delivery and
+lower latency than polling. Miki **supervises its own webhook registration**, so it stays
+low-maintenance (details in [Self-healing](#self-healing)).
 
-> Switch to webhook only if you later want to share Observer's Nginx + 443.
-> For now, polling keeps miki dead simple.
+> Polling (`RUN_MODE=polling`) still works and needs no inbound port or proxy, but it is
+> **no longer used for this droplet**. See [Alternative: polling](#alternative-polling)
+> if you ever need it. The `render.yaml` is for Render only; ignore it here.
 
 ## Prereqs (already done by Observer's DEPLOY_DO.md)
 The droplet setup — 2 GB swap, Docker + Compose, UFW — is shared. Do it once (see
@@ -18,36 +19,30 @@ The droplet setup — 2 GB swap, Docker + Compose, UFW — is shared. Do it once
 
 ## Deploy steps
 1. `git clone` this repo to `/opt/miki` (or `scp` it up).
-2. Copy `.env.sample` → `.env` and fill in:
+2. Copy `.env.sample` → `.env` and fill in (see [`.env` for webhook mode](#env-for-webhook-mode)):
    - `BOT_TOKEN`, `SOURCE_CHAT_ID`, `ARCHIVE_CHAT_ID`, `ADMIN_USER_IDS`
-   - `RUN_MODE=polling`
+   - `RUN_MODE=webhook` plus the `WEBHOOK_*` / `HEALTH_*` keys
    - `SORT_DRY_RUN=true` for the first run to verify behavior safely, then flip to `false`
 3. Persist the SQLite DB + backups on the host so they survive redeploys:
    - `DATABASE_PATH=var/miki.sqlite3`, `BACKUP_DIRECTORY=var/backups`
-   - mount `./var:/app/var` as a volume
-4. Build & run (the repo already has a `Dockerfile`):
+   - the bundled `docker-compose.yml` already mounts `./var:/app/var`
+4. Stand up the [reverse proxy + TLS](#reverse-proxy--tls) for `miki.<domain>`.
+5. Build & run with the bundled compose file (publishes `127.0.0.1:8080`, mounts `./var`,
+   sets the memory cap and restart policy):
    ```bash
-   docker build -t miki .
-   docker run -d --name miki --restart unless-stopped \
-     --env-file .env --memory=150m \
-     -v "$PWD/var:/app/var" miki
+   cd /opt/miki
+   docker compose up -d --build
+   docker compose logs -f
    ```
-   …or fold it into the shared `docker-compose.yml` as a `miki` service.
 
-## Recommended: one shared compose file
-Cleaner than separate `docker run`s. Add miki as a service next to Observer's:
-```yaml
-  miki:
-    build: ../miki_a_friendly_sorter_bot   # adjust path
-    restart: unless-stopped
-    env_file: ../miki_a_friendly_sorter_bot/.env
-    volumes:
-      - ../miki_a_friendly_sorter_bot/var:/app/var
-    deploy:
-      resources:
-        limits:
-          memory: 150M
+## Redeploying an update
+```bash
+cd /opt/miki
+git pull
+docker compose up -d --build      # rebuilds the image and recreates the container
+docker compose logs -f            # expect: "running in webhook mode"
 ```
+The `./var` volume (DB + backups) is untouched by the rebuild.
 
 ## Footprint
 - ~100 MB idle RAM, ~150 MB cap. Comfortable within the 512 MB + 2 GB swap budget.
@@ -55,17 +50,14 @@ Cleaner than separate `docker run`s. Add miki as a service next to Observer's:
 
 ## Sanity checks after deploy
 ```bash
-docker logs -f miki            # watch startup + polling
-# inside container or via console scripts:
-miki-doctor                    # diagnostics
-miki-show-ids                  # confirm chat/thread IDs
+docker compose logs -f                 # watch startup + webhook registration
+docker compose exec miki miki-doctor   # diagnostics
+docker compose exec miki miki-show-ids # confirm chat/thread IDs
 ```
 Keep `SORT_DRY_RUN=true` until logs show it picking up the right messages, then set `false`.
 
-## Optional: self-healing webhook mode on the droplet
-Polling above stays the simplest path. If you want webhook mode (a public HTTPS host
-+ a reverse proxy on the droplet), Miki **supervises its own webhook registration** so
-it stays low-maintenance:
+## Self-healing
+Miki supervises its own webhook registration so it stays low-maintenance:
 
 - A reconcile loop (every `WEBHOOK_RECONCILE_INTERVAL_SECONDS`, default 120s) compares
   Telegram's live `getWebhookInfo` against the desired registration and re-runs
@@ -77,7 +69,7 @@ it stays low-maintenance:
   with `--restart unless-stopped`, restarts only a *confidently wedged* process
   (breaker open **and** updates stale) — a quiet source never triggers a restart loop.
 
-> ⚠️ **`--env-file` does not strip inline comments.** In `.env`, never write
+> ⚠️ **`env_file` does not strip inline comments.** In `.env`, never write
 > `KEY=value   # note` — Docker keeps `value   # note` as the literal value and Miki
 > will fail to start. Put comments on their own lines.
 
@@ -90,18 +82,17 @@ WEBHOOK_SECRET_TOKEN=long-random-secret
 WEBHOOK_RECONCILE_ENABLED=true
 HEALTH_SERVER_ENABLED=true
 HEALTH_PORT=8081
+# Album reassembly (webhook delivers album members as separate, staggered POSTs;
+# a longer debounce lets every member join the group before it flushes).
+ALBUM_FLUSH_DELAY_SECONDS=10
+ALBUM_MAX_WAIT_SECONDS=60
 ```
 
-### Run the container (publish the webhook port to localhost)
-The reverse proxy runs on the host, so publish Miki's port to `127.0.0.1` (not the
-public interface — the proxy terminates TLS and forwards inward):
+The bundled `docker-compose.yml` publishes the webhook port to `127.0.0.1:8080` (the
+proxy terminates TLS and forwards inward — never the public interface), mounts `./var`,
+and applies the memory cap + restart policy. After `docker compose up -d --build`:
 ```bash
-docker run -d --name miki --restart unless-stopped \
-  -p 127.0.0.1:8080:8080 \
-  --env-file /opt/miki/.env \
-  -v /opt/miki/var:/app/var \
-  miki
-docker port miki        # expect: 8080/tcp -> 127.0.0.1:8080
+docker compose port miki 8080   # expect: 127.0.0.1:8080
 ```
 
 ### Reverse proxy + TLS
@@ -125,3 +116,11 @@ curl -s "https://api.telegram.org/bot${TOKEN}/getWebhookInfo" | python3 -m json.
 Want `pending_update_count` near 0 and no fresh `last_error_message`. Watch self-healing
 via `/doctor` or `/status` in Telegram (both print a "Webhook supervision" section), or
 `curl -s localhost:8081/metrics | grep webhook`.
+
+## Alternative: polling
+Not used on this droplet, kept for reference. Polling needs no inbound port, proxy, or
+TLS — the bot dials out to Telegram. To run it instead, set `RUN_MODE=polling` in `.env`,
+drop the `ports:` block from `docker-compose.yml` (the webhook port is unused), and
+`docker compose up -d --build`. Album members arrive batched in each `getUpdates` pull,
+so the staggered-delivery race that webhook mitigates with `ALBUM_FLUSH_DELAY_SECONDS`
+does not apply.

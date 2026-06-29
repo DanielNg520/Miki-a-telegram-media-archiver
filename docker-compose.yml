@@ -1,0 +1,26 @@
+# Webhook-mode deployment for the DigitalOcean droplet.
+#
+# The host reverse proxy (Caddy/nginx) terminates TLS and forwards inward, so
+# the webhook port is published to 127.0.0.1 only — never the public interface.
+# The health port (8081) stays inside the container; the image HEALTHCHECK probes
+# it in-process and `restart: unless-stopped` recycles a confidently-wedged bot.
+#
+# Usage:  docker compose up -d --build
+# Logs:   docker compose logs -f
+services:
+  miki:
+    build: .
+    image: miki
+    container_name: miki
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # host -> container; proxy forwards https://miki.<domain>/telegram/webhook here
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Persist the SQLite DB + backups across rebuilds
+      - ./var:/app/var
+    deploy:
+      resources:
+        limits:
+          memory: 150M
