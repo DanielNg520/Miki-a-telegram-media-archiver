@@ -51,14 +51,17 @@ Important IDs:
   in a listed source topic is copied to its registered destination without requiring a hashtag,
   keyword, phrase, or caption. Source topics must be unique; multiple sources may share a destination.
 - `REQUEST_CHAT_ID`: supergroup where retrieval requests are submitted and results are copied.
-  Leave blank to use `ARCHIVE_CHAT_ID`.
+  Leave blank to use `ARCHIVE_CHAT_ID`. This is the `.env` default; it can be changed at runtime
+  (no restart) with `/set request_chat_id <id>`, and `/reset request_chat_id` reverts to it.
 - `COLLECTOR_URL`: Data Collector API URL.
 - `COLLECTOR_API_KEY`: Miki's Data Collector API key.
 - `COLLECTOR_DATABASE`: database name to query, such as `gvdb`.
 - `DATABASE_PATH`: local SQLite database used for Miki's durable state and search index.
 - `ADMIN_USER_IDS`: comma-separated Telegram user IDs allowed to manage Miki.
 - `REQUEST_TOPIC_IDS`: comma-separated topic IDs within `REQUEST_CHAT_ID` where retrieval requests
-  are accepted.
+  are accepted. This is the `.env` default; it can be changed at runtime (no restart) with
+  `/set request_topic_ids <id,...>` or the in-topic `/request_topic_add` / `/request_topic_remove`
+  commands. `/reset request_topic_ids` reverts to this value.
 - `DEFAULT_REQUEST_LIMIT` and `MAX_REQUEST_LIMIT`: bounds for future retrieval jobs.
 - `LOG_LEVEL` and `LOG_FORMAT`: application logging controls. Use `LOG_FORMAT=console` for a
   readable local terminal, or `LOG_FORMAT=json` for structured hosted logs.
@@ -213,6 +216,9 @@ with the same token (Telegram allows only one polling process).
 | --- | --- | --- | --- |
 | `/topic_register <name>` | Super admin | `/topic_register Japan` | Run **inside** the destination forum topic. Miki must be an admin of the forum. Names must be unique. |
 | `/topic_list` | Admin | `/topic_list` | Lists all active registered topics as `thread_id: name`. |
+| `/request_topic_add` | Super admin | `/request_topic_add` | Run **inside** a forum topic to start accepting `#request` retrieval there. Edits the `request_topic_ids` runtime setting, effective immediately. |
+| `/request_topic_remove` | Super admin | `/request_topic_remove` | Run inside a topic to stop accepting `#request` there. |
+| `/request_topic_list` | Admin | `/request_topic_list` | Lists the request chat and the topic IDs currently accepting `#request`. |
 
 Topic open/close/rename in Telegram is tracked automatically — closing a topic deactivates it
 (routing/indexing pause), reopening reactivates it, and renaming updates the stored name.

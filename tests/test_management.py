@@ -56,6 +56,60 @@ def test_admin_registers_current_live_forum_topic(database_connection) -> None:
     )
 
 
+def _request_settings(*admins: int, chat_id: int = -100) -> SimpleNamespace:
+    return SimpleNamespace(
+        admin_user_ids=frozenset(admins),
+        effective_request_chat_id=chat_id,
+        request_topic_ids=frozenset(),
+    )
+
+
+def test_request_topic_add_and_remove_toggle_runtime_setting(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_request_settings(10), repositories)
+
+    asyncio.run(commands.request_topic_add(_update("/request_topic_add", thread_id=7), None))
+    assert commands._live.request_topic_ids() == frozenset({7})
+
+    asyncio.run(commands.request_topic_add(_update("/request_topic_add", thread_id=9), None))
+    assert commands._live.request_topic_ids() == frozenset({7, 9})
+
+    asyncio.run(commands.request_topic_remove(_update("/request_topic_remove", thread_id=7), None))
+    assert commands._live.request_topic_ids() == frozenset({9})
+
+
+def test_request_topic_add_requires_being_inside_a_topic(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_request_settings(10), repositories)
+    update = _update("/request_topic_add", thread_id=None)
+
+    asyncio.run(commands.request_topic_add(update, None))
+
+    assert commands._live.request_topic_ids() == frozenset()
+    assert "inside the forum topic" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_request_topic_add_rejects_wrong_chat(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_request_settings(10, chat_id=-999), repositories)
+    update = _update("/request_topic_add", thread_id=7)
+
+    asyncio.run(commands.request_topic_add(update, None))
+
+    assert commands._live.request_topic_ids() == frozenset()
+    assert "only accepted in chat" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_request_topic_add_rejects_non_admin(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    commands = ManagementCommands(_request_settings(10), repositories)
+    update = _update("/request_topic_add", thread_id=7, user_id=99)
+
+    asyncio.run(commands.request_topic_add(update, None))
+
+    assert commands._live.request_topic_ids() == frozenset()
+
+
 def test_unauthorized_user_cannot_change_routes(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     commands = ManagementCommands(_settings(10), repositories)

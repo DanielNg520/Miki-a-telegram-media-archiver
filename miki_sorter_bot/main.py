@@ -130,7 +130,9 @@ def _run(settings: Settings) -> None:
         delivery_executor,
         live_settings=live_settings,
     )
-    retrieval = RetrievalService(settings, repositories, delivery_executor)
+    retrieval = RetrievalService(
+        settings, repositories, delivery_executor, live_settings=live_settings
+    )
     recovery = JobRecoveryService(
         repositories,
         sorting,
@@ -490,6 +492,9 @@ def _add_management_handlers(
     handlers = {
         "topic_register": management.topic_register,
         "topic_list": management.topic_list,
+        "request_topic_add": management.request_topic_add,
+        "request_topic_remove": management.request_topic_remove,
+        "request_topic_list": management.request_topic_list,
         "keyword_add": management.keyword_add,
         "keyword_remove": management.keyword_remove,
         "keyword_replace": management.keyword_replace,

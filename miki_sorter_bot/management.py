@@ -92,6 +92,81 @@ class ManagementCommands:
             + "\n".join(f"- {topic.thread_id}: {topic.name}" for topic in topics)
         )
 
+    async def request_topic_add(
+        self,
+        update: Update,
+        _: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await self._toggle_request_topic(update, add=True)
+
+    async def request_topic_remove(
+        self,
+        update: Update,
+        _: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await self._toggle_request_topic(update, add=False)
+
+    async def request_topic_list(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._authorized_context(update)
+        if command is None:
+            return
+        message, _, _ = command
+        topic_ids = sorted(self._live.request_topic_ids())
+        if not topic_ids:
+            await message.reply_text(
+                "No request topics are configured. Add one with /request_topic_add "
+                "inside the topic, or /set request_topic_ids <id,...>."
+            )
+            return
+        request_chat_id = self._live.effective_request_chat_id()
+        await message.reply_text(
+            f"#request retrieval is accepted in chat {request_chat_id}, topics:\n"
+            + "\n".join(f"- {topic_id}" for topic_id in topic_ids)
+        )
+
+    async def _toggle_request_topic(self, update: Update, *, add: bool) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, chat, user = command
+        thread_id = message.message_thread_id
+        if not thread_id:
+            verb = "accept" if add else "stop accepting"
+            await message.reply_text(
+                f"Run this command inside the forum topic you want to {verb} #request "
+                "messages in (or use /set request_topic_ids <id,...> from anywhere)."
+            )
+            return
+        request_chat_id = self._live.effective_request_chat_id()
+        if chat.id != request_chat_id:
+            await message.reply_text(
+                f"Retrieval requests are only accepted in chat {request_chat_id}. "
+                "Run this in that chat, or change it with /set request_chat_id "
+                f"{chat.id} first."
+            )
+            return
+        current = self._live.request_topic_ids()
+        updated = current | {thread_id} if add else current - {thread_id}
+        if updated == current:
+            state = "already" if add else "not"
+            await message.reply_text(f"Topic {thread_id} is {state} a request topic.")
+            return
+        rendered = ", ".join(str(topic_id) for topic_id in sorted(updated))
+        self._live.registry.set(
+            "request_topic_ids", rendered, self._live.settings, self._live.store, user.id
+        )
+        action = "added to" if add else "removed from"
+        await message.reply_text(
+            f"Topic {thread_id} {action} request topics (effective immediately). "
+            f"Now: {rendered or '(none)'}."
+        )
+        self._audit(
+            user.id,
+            "request_topic.add" if add else "request_topic.remove",
+            "runtime_setting",
+            "request_topic_ids",
+        )
+
     async def keyword_add(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await self._add_mapping(update, "keyword")
 

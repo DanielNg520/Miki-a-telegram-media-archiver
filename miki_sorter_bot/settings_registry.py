@@ -83,6 +83,34 @@ def render_number(value: float) -> str:
     return f"{value:g}"
 
 
+def parse_int(raw: str) -> int:
+    """Parse a single (possibly negative) integer, e.g. a Telegram chat ID."""
+    try:
+        return int(raw.strip())
+    except ValueError as error:
+        raise ValueError("expected a whole number") from error
+
+
+def parse_int_set(raw: str) -> frozenset[int]:
+    """Parse a comma- or space-separated list of integers into a set.
+
+    Used for ID rosters (e.g. forum topic IDs) that operators edit live. An
+    empty string yields an empty set so the value can be cleared deliberately.
+    """
+    tokens = [token for token in raw.replace(",", " ").split() if token]
+    values: set[int] = set()
+    for token in tokens:
+        try:
+            values.add(int(token))
+        except ValueError as error:
+            raise ValueError(f"expected whole numbers, got '{token}'") from error
+    return frozenset(values)
+
+
+def render_int_set(value: Iterable[int]) -> str:
+    return ", ".join(str(item) for item in sorted(value))
+
+
 @dataclass(frozen=True, slots=True)
 class SettingSpec:
     key: str
@@ -238,6 +266,24 @@ def default_registry() -> SettingsRegistry:
                 render_bool,
                 lambda s: bool(getattr(s, "sort_dry_run", False)),
             ),
+            SettingSpec(
+                "request_chat_id",
+                "requests",
+                "Chat (supergroup) ID where #request retrieval messages are accepted.",
+                parse_int,
+                str,
+                lambda s: int(getattr(s, "effective_request_chat_id", 0)),
+            ),
+            SettingSpec(
+                "request_topic_ids",
+                "requests",
+                "Forum topic IDs where #request retrieval messages are accepted "
+                "(comma-separated). Also editable in-topic with "
+                "/request_topic_add and /request_topic_remove.",
+                parse_int_set,
+                render_int_set,
+                lambda s: frozenset(getattr(s, "request_topic_ids", frozenset())),
+            ),
         ]
     )
 
@@ -295,3 +341,9 @@ class LiveSettings:
 
     def sort_dry_run(self) -> bool:
         return bool(self.get("sort_dry_run"))
+
+    def request_topic_ids(self) -> frozenset[int]:
+        return frozenset(self.get("request_topic_ids"))
+
+    def effective_request_chat_id(self) -> int:
+        return int(self.get("request_chat_id"))

@@ -10,10 +10,20 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from miki_sorter_bot.config import Settings
-from miki_sorter_bot.repositories import JobRecord, SqliteRepositories, TopicRecord
+from miki_sorter_bot.repositories import (
+    IndexedPostRecord,
+    JobRecord,
+    RetrievalItemRecord,
+    SqliteRepositories,
+    TopicRecord,
+)
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
+from miki_sorter_bot.settings_registry import LiveSettings
 
 LOGGER = logging.getLogger(__name__)
+
+# Telegram caps a media group (album) at 10 items.
+_TELEGRAM_ALBUM_LIMIT = 10
 
 
 class RequestValidationError(ValueError):
@@ -35,13 +45,15 @@ class RetrievalSummary:
     unavailable: int = 0
     skipped: int = 0
     failed: int = 0
+    albums: int = 0
     cancelled: bool = False
 
     def text(self, job_id: int) -> str:
         state = "cancelled" if self.cancelled else "completed"
+        album_note = f" ({self.albums} as album{'s' if self.albums != 1 else ''})" if self.albums else ""
         return (
             f"Request {job_id} {state}: {self.matched} matched, "
-            f"{self.copied} copied, {self.unavailable} unavailable, "
+            f"{self.copied} copied{album_note}, {self.unavailable} unavailable, "
             f"{self.skipped} skipped, {self.failed} failed."
         )
 
@@ -100,9 +112,11 @@ class RetrievalService:
         settings: Settings,
         repositories: SqliteRepositories,
         delivery_executor: DeliveryExecutor | None = None,
+        live_settings: LiveSettings | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
+        self._live = live_settings or LiveSettings(settings, repositories)
         self._delivery_executor = delivery_executor or DeliveryExecutor(
             retry_policy=RetryPolicy(),
             rate_limiter=RateLimiter(1000),
@@ -122,8 +136,8 @@ class RetrievalService:
         if not text.casefold().startswith("#request"):
             return
         if (
-            chat.id != self._settings.effective_request_chat_id
-            or message.message_thread_id not in self._settings.request_topic_ids
+            chat.id != self._live.effective_request_chat_id()
+            or message.message_thread_id not in self._live.request_topic_ids()
         ):
             await message.reply_text("Retrieval requests are not allowed in this topic.")
             return
@@ -243,7 +257,7 @@ class RetrievalService:
             if current is None or current.status == "cancelled":
                 summary.cancelled = True
                 break
-            pending: list[tuple[Any, Any]] = []
+            pending: list[tuple[IndexedPostRecord, RetrievalItemRecord]] = []
             for post in group:
                 item = self._repositories.ensure_retrieval_item(
                     job_id,
@@ -274,6 +288,8 @@ class RetrievalService:
                 )
         if summary.copied:
             self._repositories.increment_metric("retrieval_items_copied", summary.copied)
+        if summary.albums:
+            self._repositories.increment_metric("retrieval_albums_batched", summary.albums)
         if summary.skipped:
             self._repositories.increment_metric("retrieval_items_skipped", summary.skipped)
         if summary.cancelled:
@@ -304,15 +320,36 @@ class RetrievalService:
         self,
         job_id: int,
         job: JobRecord,
-        pending: list[tuple[Any, Any]],
+        pending: list[tuple[IndexedPostRecord, RetrievalItemRecord]],
         request_message: Any,
         destination_chat_id: int,
         context: ContextTypes.DEFAULT_TYPE,
         summary: RetrievalSummary,
     ) -> None:
-        """Deliver album members as a single grouped batch via copy_messages."""
-        from_chat_id = pending[0][0].source_chat_id
-        message_ids = [post.source_message_id for post, _ in pending]
+        """Deliver album members as grouped batches via copy_messages.
+
+        A logical post group is normally a single Telegram album (<= 10 items),
+        but we defensively split into chunks of ``_TELEGRAM_ALBUM_LIMIT`` so an
+        over-sized group can never make Telegram reject the whole batch.
+        """
+        for start in range(0, len(pending), _TELEGRAM_ALBUM_LIMIT):
+            chunk = pending[start : start + _TELEGRAM_ALBUM_LIMIT]
+            await self._deliver_album_chunk(
+                job_id, job, chunk, request_message, destination_chat_id, context, summary
+            )
+
+    async def _deliver_album_chunk(
+        self,
+        job_id: int,
+        job: JobRecord,
+        chunk: list[tuple[IndexedPostRecord, RetrievalItemRecord]],
+        request_message: Any,
+        destination_chat_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        summary: RetrievalSummary,
+    ) -> None:
+        from_chat_id = chunk[0][0].source_chat_id
+        message_ids = [post.source_message_id for post, _ in chunk]
         try:
             copied = await self._delivery_executor.run(
                 lambda: context.bot.copy_messages(
@@ -324,31 +361,64 @@ class RetrievalService:
                 retry_unknown_outcome=False,
             )
         except Exception as error:
-            # Fall back to per-message copies so unavailable members are pinpointed
-            # rather than failing the whole album.
+            if classify_error(error).outcome_unknown:
+                # The batch may have already delivered; re-copying per message would
+                # duplicate the album. Fail the whole group and let recovery requeue it.
+                self._fail_album(job_id, job, chunk, error, summary)
+                return
+            # A definite failure: fall back to per-message copies so unavailable
+            # members are pinpointed rather than failing the whole album.
             LOGGER.warning(
                 "Retrieval album copy failed; falling back to single copies",
                 extra={"job_id": job_id, "message_ids": message_ids, "error": str(error)},
             )
-            for post, item in pending:
+            for post, item in chunk:
                 await self._deliver_single(
                     job_id, job, post, item, request_message, destination_chat_id, context, summary
                 )
             return
-        for (post, item), copied_message in zip(pending, copied):
+        for (post, item), copied_message in zip(chunk, copied):
             self._repositories.update_retrieval_item(
                 item.id,
                 "sent",
                 destination_message_id=copied_message.message_id,
             )
             summary.copied += 1
+        summary.albums += 1
+
+    def _fail_album(
+        self,
+        job_id: int,
+        job: JobRecord,
+        pending: list[tuple[IndexedPostRecord, RetrievalItemRecord]],
+        error: Exception,
+        summary: RetrievalSummary,
+    ) -> None:
+        """Record every album member as failed after an unknown-outcome batch copy."""
+        for post, item in pending:
+            self._repositories.update_retrieval_item(
+                item.id, "failed", error="delivery outcome unknown after timeout"
+            )
+            summary.failed += 1
+            self._repositories.add_dead_letter(
+                job_id,
+                "retrieve_copy",
+                {"post_id": post.id, "request": job.payload},
+                "outcome_unknown",
+                str(error),
+            )
+        self._repositories.increment_metric("telegram_delivery_outcome_unknown", len(pending))
+        LOGGER.warning(
+            "Retrieval album copy outcome unknown; deferred to recovery",
+            extra={"job_id": job_id, "post_ids": [post.id for post, _ in pending]},
+        )
 
     async def _deliver_single(
         self,
         job_id: int,
         job: JobRecord,
-        post: Any,
-        item: Any,
+        post: IndexedPostRecord,
+        item: RetrievalItemRecord,
         request_message: Any,
         destination_chat_id: int,
         context: ContextTypes.DEFAULT_TYPE,
@@ -472,9 +542,11 @@ class RetrievalService:
         return matches[0]
 
 
-def _group_by_logical_post(posts: list[Any]) -> list[list[Any]]:
+def _group_by_logical_post(
+    posts: list[IndexedPostRecord],
+) -> list[list[IndexedPostRecord]]:
     """Group consecutive posts that share a logical_post_key (album members)."""
-    groups: list[list[Any]] = []
+    groups: list[list[IndexedPostRecord]] = []
     sentinel = object()
     current_key: object = sentinel
     for post in posts:

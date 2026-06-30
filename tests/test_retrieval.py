@@ -180,7 +180,31 @@ def test_human_request_copies_results_and_reports_summary(database_connection) -
     assert bot.copy_messages.await_args_list[0].kwargs["message_ids"] == [2, 3]
     replies = [call.args[0] for call in update.effective_message.reply_text.await_args_list]
     assert replies[0].endswith("queued.")
-    assert "2 matched, 3 copied" in replies[-1]
+    assert "2 matched, 3 copied (1 as album)" in replies[-1]
+
+
+def test_oversized_album_is_split_into_chunks_of_ten(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    for message_id in range(1, 13):  # 12 members of one album
+        indexer.index(_media(message_id, "Tokyo", album="big-album"), -200)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 20")
+    bot = SimpleNamespace(
+        copy_messages=AsyncMock(
+            side_effect=lambda **kw: [
+                SimpleNamespace(message_id=900 + mid) for mid in kw["message_ids"]
+            ]
+        )
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    batches = [call.kwargs["message_ids"] for call in bot.copy_messages.await_args_list]
+    assert batches == [list(range(1, 11)), [11, 12]]
+    assert "12 copied (2 as albums)" in update.effective_message.reply_text.await_args_list[-1].args[0]
 
 
 def test_album_batch_failure_falls_back_to_single_copies(database_connection) -> None:
@@ -234,6 +258,46 @@ def test_album_batch_seam_builds_real_copy_messages_call(database_connection) ->
     assert batch["message_ids"] == [2, 3]
     assert batch["message_thread_id"] == 50
     assert "2 matched, 3 copied" in update.effective_message.reply_text.await_args_list[-1].args[0]
+
+
+def test_request_topic_ids_override_unlocks_new_topic(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    # Settings default forbids topic 50; the requester posts in topic 77.
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update(
+        "#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 1", thread_id=77
+    )
+    bot = SimpleNamespace(copy_message=AsyncMock(return_value=SimpleNamespace(message_id=201)))
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+    assert "not allowed in this topic" in update.effective_message.reply_text.await_args.args[0]
+
+    # Operator opens topic 77 for requests at runtime; no restart, no new service.
+    repositories.set_runtime_setting("request_topic_ids", "77")
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+    replies = [call.args[0] for call in update.effective_message.reply_text.await_args_list]
+    assert replies[-1].startswith("Request")
+    bot.copy_message.assert_awaited()
+
+
+def test_album_unknown_outcome_does_not_resend_individually(database_connection) -> None:
+    from telegram.error import TimedOut
+
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nmatch: any\nlimit: 10")
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=201)),
+        copy_messages=AsyncMock(side_effect=TimedOut()),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    # Standalone post still copied; the album is NOT re-sent per message (would duplicate).
+    assert [call.kwargs["message_id"] for call in bot.copy_message.await_args_list] == [1]
+    assert "2 failed" in update.effective_message.reply_text.await_args_list[-1].args[0]
 
 
 def test_replayed_request_does_not_copy_again(database_connection) -> None:

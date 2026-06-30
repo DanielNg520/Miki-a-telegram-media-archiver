@@ -11,6 +11,8 @@ from miki_sorter_bot.settings_registry import (
     bounded_int,
     default_registry,
     parse_bool,
+    parse_int_set,
+    render_int_set,
 )
 
 
@@ -40,6 +42,8 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "lookback_capacity": 5,
         "send_confirmation": False,
         "sort_dry_run": False,
+        "request_topic_ids": frozenset({50}),
+        "effective_request_chat_id": -1001,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -152,3 +156,46 @@ def test_live_settings_accessors_cover_registered_keys() -> None:
     assert live.lookback_capacity() == 5
     assert live.send_confirmation() is False
     assert live.sort_dry_run() is False
+    assert live.request_topic_ids() == frozenset({50})
+    assert live.effective_request_chat_id() == -1001
+
+
+def test_request_chat_id_override_resolves_live() -> None:
+    live = LiveSettings(_settings(), FakeStore())
+    assert live.effective_request_chat_id() == -1001
+    live.registry.set("request_chat_id", "-1009999", live.settings, live.store, user_id=1)
+    assert live.effective_request_chat_id() == -1009999
+    live.registry.reset("request_chat_id", live.store)
+    assert live.effective_request_chat_id() == -1001
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("123,456", frozenset({123, 456})),
+        ("123 456", frozenset({123, 456})),
+        (" 123 , 456 ", frozenset({123, 456})),
+        ("", frozenset()),
+    ],
+)
+def test_parse_int_set_accepts_commas_and_spaces(raw: str, expected: frozenset[int]) -> None:
+    assert parse_int_set(raw) == expected
+
+
+def test_parse_int_set_rejects_non_integers() -> None:
+    with pytest.raises(ValueError):
+        parse_int_set("123, abc")
+
+
+def test_render_int_set_is_sorted_and_round_trips() -> None:
+    assert render_int_set(frozenset({456, 123})) == "123, 456"
+    assert parse_int_set(render_int_set(frozenset({456, 123}))) == frozenset({123, 456})
+
+
+def test_request_topic_ids_override_resolves_live() -> None:
+    live = LiveSettings(_settings(), FakeStore())
+    assert live.request_topic_ids() == frozenset({50})
+    live.registry.set("request_topic_ids", "70, 80", live.settings, live.store, user_id=1)
+    assert live.request_topic_ids() == frozenset({70, 80})
+    live.registry.reset("request_topic_ids", live.store)
+    assert live.request_topic_ids() == frozenset({50})
