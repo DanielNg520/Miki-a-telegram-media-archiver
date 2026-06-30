@@ -286,16 +286,23 @@ media back into the topic where the request was posted.
 #request
 topic: Japan
 keywords: TOKYO, "Mount Fuji"
-match: any
-limit: 10
 ```
 
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `topic` | yes | Destination topic name or numeric thread ID to search. |
 | `keywords` | yes | Comma-separated words/`"phrases"`; a leading `#` is allowed. |
-| `match` | no | `all` (default) requires every keyword; `any` requires at least one. |
-| `limit` | no | Max posts to copy (defaults to `DEFAULT_REQUEST_LIMIT`, capped by `MAX_REQUEST_LIMIT`). |
+
+If a request matches more than `DEFAULT_REQUEST_LIMIT` (10) posts, Miki does **not** copy anything;
+it replies with a numbered preview list of the most recent matches and asks the requester to add
+more keywords to narrow the search. Malformed requests get a reply with a worked example.
+
+**Advanced fields** (kept simple by default — most requesters never need these):
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `match` | `all` | `all` requires every keyword; `any` requires at least one. |
+| `limit` | `DEFAULT_REQUEST_LIMIT` | Max posts to copy, capped by `MAX_REQUEST_LIMIT`. Setting it explicitly delivers up to that many and skips the narrowing prompt. |
 
 Bot requesters must also be listed in `REQUESTER_BOT_IDS`. Miki replies with a job ID and a summary
 (matched/copied/unavailable/skipped/failed).

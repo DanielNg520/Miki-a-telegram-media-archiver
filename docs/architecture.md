@@ -92,14 +92,21 @@ requesters must also be in `REQUESTER_BOT_IDS`. Request form:
 #request
 topic: <archive topic ID or unique registered name>
 keywords: <token or "quoted phrase">[, ...]
-match: all | any        # optional, default all
-limit: <n>              # optional, default DEFAULT_REQUEST_LIMIT, capped by MAX_REQUEST_LIMIT
+match: all | any        # advanced, optional, default all
+limit: <n>              # advanced, optional, default DEFAULT_REQUEST_LIMIT, capped by MAX_REQUEST_LIMIT
 ```
 
 `topic` and `keywords` are required; unknown/duplicate/malformed fields are rejected without
-creating a job. Hashtag searches may include or omit `#`. `all` requires every term, `any` at least
-one; tokens are aggregated across album members. Results are newest-first and `limit` counts logical
-posts, not album members.
+creating a job (the reply includes a worked example). `match` and `limit` are advanced fields kept
+out of the user-facing examples. Hashtag searches may include or omit `#`. `all` requires every
+term, `any` at least one; tokens are aggregated across album members. Results are newest-first and
+`limit` counts logical posts, not album members.
+
+When `limit` is omitted, a result set larger than `DEFAULT_REQUEST_LIMIT` logical posts is **not**
+delivered: the service searches a wider preview window (`_RESULT_PREVIEW_LIMIT`), replies with a
+numbered preview list (caption or media-type per post) plus the worked example, marks the job
+completed, and increments `retrieval_overflow_prompts`. An explicit `limit` opts out of this — it is
+honoured verbatim with no narrowing prompt.
 
 Each request is an idempotent job keyed by request chat + message ID; each result member has a
 durable retrieval-item record keyed by job + post. Available members are delivered **as a batched

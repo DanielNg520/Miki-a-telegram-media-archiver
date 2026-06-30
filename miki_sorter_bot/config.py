@@ -67,7 +67,7 @@ class Settings(BaseSettings):
         default_factory=frozenset,
         alias="REQUESTER_BOT_IDS",
     )
-    default_request_limit: int = Field(default=20, gt=0, alias="DEFAULT_REQUEST_LIMIT")
+    default_request_limit: int = Field(default=10, gt=0, alias="DEFAULT_REQUEST_LIMIT")
     max_request_limit: int = Field(default=100, gt=0, alias="MAX_REQUEST_LIMIT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: str = Field(default="console", alias="LOG_FORMAT")

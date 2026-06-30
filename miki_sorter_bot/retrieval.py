@@ -25,6 +25,24 @@ LOGGER = logging.getLogger(__name__)
 # Telegram caps a media group (album) at 10 items.
 _TELEGRAM_ALBUM_LIMIT = 10
 
+# When a default request matches more results than we will deliver, we show a
+# preview list (capped at this many lines) so the requester can narrow it.
+_RESULT_PREVIEW_LIMIT = 30
+
+# Each preview line trims its caption to keep the listing message well under
+# Telegram's ~4096 character limit.
+_PREVIEW_CAPTION_CHARS = 80
+
+# Shown to requesters whenever we need to demonstrate the request format. The
+# advanced fields (match, limit) are intentionally omitted to keep the UX simple.
+_REQUEST_EXAMPLE = (
+    "Send a request like this:\n\n"
+    "#request\n"
+    "topic: <topic name>\n"
+    'keywords: <word>, "a phrase"\n\n'
+    "I'll send up to 10 of the most recent matching posts."
+)
+
 
 class RequestValidationError(ValueError):
     pass
@@ -36,6 +54,10 @@ class RetrievalRequest:
     keywords: tuple[str, ...]
     match_mode: str
     limit: int
+    # True when the requester explicitly set `limit` (an advanced field). The
+    # default path leaves this False so we can offer a narrowing list when more
+    # than `limit` posts match; explicit requests are honoured verbatim.
+    limit_explicit: bool = False
 
 
 @dataclass(slots=True)
@@ -50,7 +72,9 @@ class RetrievalSummary:
 
     def text(self, job_id: int) -> str:
         state = "cancelled" if self.cancelled else "completed"
-        album_note = f" ({self.albums} as album{'s' if self.albums != 1 else ''})" if self.albums else ""
+        album_note = (
+            f" ({self.albums} as album{'s' if self.albums != 1 else ''})" if self.albums else ""
+        )
         return (
             f"Request {job_id} {state}: {self.matched} matched, "
             f"{self.copied} copied{album_note}, {self.unavailable} unavailable, "
@@ -97,13 +121,15 @@ def parse_request(text: str, *, default_limit: int, max_limit: int) -> Retrieval
     match_mode = fields.get("match", "all").casefold()
     if match_mode not in {"all", "any"}:
         raise RequestValidationError("match must be all or any.")
+    limit_field = fields.get("limit")
+    limit_explicit = limit_field is not None
     try:
-        limit = int(fields.get("limit", str(default_limit)))
+        limit = int(limit_field) if limit_explicit else default_limit
     except ValueError as error:
         raise RequestValidationError("limit must be an integer.") from error
     if limit < 1 or limit > max_limit:
         raise RequestValidationError(f"limit must be between 1 and {max_limit}.")
-    return RetrievalRequest(fields["topic"], keywords, match_mode, limit)
+    return RetrievalRequest(fields["topic"], keywords, match_mode, limit, limit_explicit)
 
 
 class RetrievalService:
@@ -152,7 +178,7 @@ class RetrievalService:
             )
             topic = self._resolve_topic(request.topic_reference)
         except RequestValidationError as error:
-            await message.reply_text(f"Invalid request: {error}")
+            await message.reply_text(f"Invalid request: {error}\n\n{_REQUEST_EXAMPLE}")
             return
         key = f"retrieve:{chat.id}:{message.message_id}"
         job = self._repositories.enqueue(
@@ -244,15 +270,36 @@ class RetrievalService:
             return
         if not self._repositories.claim_job(job_id):
             return
+        # The default path searches a wider window so we can detect (and offer to
+        # narrow) result sets larger than we will deliver. Explicit `limit`
+        # requests are honoured verbatim with no narrowing prompt.
+        search_limit = (
+            request.limit if request.limit_explicit else max(request.limit, _RESULT_PREVIEW_LIMIT)
+        )
         posts = self._repositories.search_posts(
             self._settings.archive_chat_id,
             topic.thread_id,
             request.keywords,
             request.match_mode,
-            request.limit,
+            search_limit,
         )
-        summary = RetrievalSummary(matched=len({post.logical_post_key for post in posts}))
-        for group in _group_by_logical_post(posts):
+        groups = _group_by_logical_post(posts)
+        if not request.limit_explicit and len(groups) > request.limit:
+            await self._reply_too_many(job_id, request, groups, request_message)
+            self._repositories.increment_metric("retrieval_overflow_prompts", 1)
+            self._repositories.update_job(job_id, "completed")
+            self._repositories.add_audit_event(
+                actor_type="system",
+                actor_id="miki",
+                action="retrieval.overflow",
+                resource_type="job",
+                resource_id=str(job_id),
+                outcome="success",
+                details={"listed": len(groups), "limit": request.limit},
+            )
+            return
+        summary = RetrievalSummary(matched=len(groups))
+        for group in groups:
             current = self._repositories.get_job(job_id)
             if current is None or current.status == "cancelled":
                 summary.cancelled = True
@@ -315,6 +362,24 @@ class RetrievalService:
             },
         )
         await request_message.reply_text(summary.text(job_id))
+
+    async def _reply_too_many(
+        self,
+        job_id: int,
+        request: RetrievalRequest,
+        groups: list[list[IndexedPostRecord]],
+        request_message: Any,
+    ) -> None:
+        """Offer a preview list so the requester can narrow an oversized result set."""
+        lines = [
+            f"{index}. {_describe_group(group)}"
+            for index, group in enumerate(groups[:_RESULT_PREVIEW_LIMIT], start=1)
+        ]
+        await request_message.reply_text(
+            f"Request {job_id}: I found more than {request.limit} matching posts. "
+            "Here are the most recent — add more keywords to narrow your search to "
+            f"{request.limit} or fewer:\n\n" + "\n".join(lines) + f"\n\n{_REQUEST_EXAMPLE}"
+        )
 
     async def _deliver_album(
         self,
@@ -518,7 +583,7 @@ class RetrievalService:
         topic = self._repositories.get(self._settings.archive_chat_id, source_thread_id)
         if topic is None or not topic.is_active:
             raise ValueError(f"retrieval job {job.id} targets an inactive source topic")
-        request = RetrievalRequest(str(source_thread_id), keywords, match_mode, limit)
+        request = RetrievalRequest(str(source_thread_id), keywords, match_mode, limit, True)
         message = RecoveredRequestMessage(
             bot,
             destination_chat_id,
@@ -555,6 +620,20 @@ def _group_by_logical_post(
             groups.append([])
         groups[-1].append(post)
     return groups
+
+
+def _describe_group(group: list[IndexedPostRecord]) -> str:
+    """One-line description of a logical post for the narrowing preview list."""
+    media_kind = (
+        f"album, {len(group)} items" if len(group) > 1 else (group[0].media_type or "media")
+    )
+    caption = next((post.caption_preview for post in group if post.caption_preview), None)
+    if not caption:
+        return f"[{media_kind}]"
+    text = " ".join(caption.split())
+    if len(text) > _PREVIEW_CAPTION_CHARS:
+        text = text[: _PREVIEW_CAPTION_CHARS - 1].rstrip() + "…"
+    return f"{text} [{media_kind}]"
 
 
 def _parse_keywords(value: str) -> tuple[str, ...]:

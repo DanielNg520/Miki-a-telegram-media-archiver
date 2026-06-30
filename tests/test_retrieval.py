@@ -17,14 +17,14 @@ from miki_sorter_bot.retrieval import (
 )
 
 
-def _settings() -> SimpleNamespace:
+def _settings(default_request_limit: int = 20) -> SimpleNamespace:
     return SimpleNamespace(
         archive_chat_id=-200,
         effective_request_chat_id=-300,
         request_topic_ids=frozenset({50}),
         requester_bot_ids=frozenset({900}),
         admin_user_ids=frozenset({1}),
-        default_request_limit=20,
+        default_request_limit=default_request_limit,
         max_request_limit=100,
     )
 
@@ -132,6 +132,70 @@ def test_parse_request_rejects_invalid_forms(text: str, error: str) -> None:
         parse_request(text, default_limit=20, max_limit=100)
 
 
+def test_parse_request_marks_explicit_limit() -> None:
+    default = parse_request(
+        "#request\ntopic: Japan\nkeywords: Tokyo", default_limit=10, max_limit=100
+    )
+    explicit = parse_request(
+        "#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 5", default_limit=10, max_limit=100
+    )
+
+    assert (default.limit, default.limit_explicit) == (10, False)
+    assert (explicit.limit, explicit.limit_explicit) == (5, True)
+
+
+def test_invalid_request_reply_includes_worked_example(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\nkeywords: Tokyo")  # missing topic
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=SimpleNamespace())))
+
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "Invalid request" in reply
+    assert "#request" in reply and "topic:" in reply
+
+
+def test_too_many_results_lists_instead_of_copying(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    now = datetime(2026, 6, 13, tzinfo=UTC)
+    for message_id in range(1, 16):  # 15 standalone matches > default limit of 10
+        indexer.index(_media(message_id, f"Tokyo shot {message_id}", created_at=now), -200)
+    service = RetrievalService(_settings(default_request_limit=10), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo")
+    bot = SimpleNamespace(copy_message=AsyncMock(), copy_messages=AsyncMock())
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    bot.copy_message.assert_not_awaited()
+    bot.copy_messages.assert_not_awaited()
+    reply = update.effective_message.reply_text.await_args_list[-1].args[0]
+    assert "more than 10" in reply
+    assert "1. Tokyo shot" in reply
+    assert repositories.metrics_snapshot()["retrieval_overflow_prompts"] == 1
+
+
+def test_explicit_limit_skips_narrowing_prompt(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    for message_id in range(1, 16):
+        indexer.index(_media(message_id, f"Tokyo shot {message_id}"), -200)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 3")
+    bot = SimpleNamespace(copy_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    assert bot.copy_message.await_count == 3
+    assert "3 matched, 3 copied" in update.effective_message.reply_text.await_args_list[-1].args[0]
+
+
 def test_search_supports_all_any_newest_first_and_album_dedup(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _library(repositories)
@@ -204,7 +268,9 @@ def test_oversized_album_is_split_into_chunks_of_ten(database_connection) -> Non
 
     batches = [call.kwargs["message_ids"] for call in bot.copy_messages.await_args_list]
     assert batches == [list(range(1, 11)), [11, 12]]
-    assert "12 copied (2 as albums)" in update.effective_message.reply_text.await_args_list[-1].args[0]
+    assert (
+        "12 copied (2 as albums)" in update.effective_message.reply_text.await_args_list[-1].args[0]
+    )
 
 
 def test_album_batch_failure_falls_back_to_single_copies(database_connection) -> None:
@@ -265,9 +331,7 @@ def test_request_topic_ids_override_unlocks_new_topic(database_connection) -> No
     _library(repositories)
     # Settings default forbids topic 50; the requester posts in topic 77.
     service = RetrievalService(_settings(), repositories)
-    update = _request_update(
-        "#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 1", thread_id=77
-    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 1", thread_id=77)
     bot = SimpleNamespace(copy_message=AsyncMock(return_value=SimpleNamespace(message_id=201)))
 
     asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))

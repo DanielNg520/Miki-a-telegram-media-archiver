@@ -25,7 +25,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.routes[0].name, "Codes")
         self.assertEqual(settings.routes[0].keywords, ["cr"])
-        self.assertEqual(settings.default_request_limit, 20)
+        self.assertEqual(settings.default_request_limit, 10)
         self.assertEqual(settings.max_request_limit, 100)
         self.assertFalse(settings.sort_dry_run)
         self.assertEqual(settings.topic_forwarding_pairs, ())
