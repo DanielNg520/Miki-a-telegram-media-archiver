@@ -1651,6 +1651,105 @@ def test_lookback_routes_single_uncaptioned_media_from_following_hashtag(
     assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
 
 
+def test_lookback_routes_forwarded_media_with_unmatched_caption(
+    database_connection,
+) -> None:
+    """Forwarded media keeps its origin's caption. If that caption routes
+    nowhere, a following hashtag-only message can still claim and route it."""
+
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message("a forwarded caption", message_id=12),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=13), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+
+
+def test_matched_caption_media_routes_immediately_not_buffered(
+    database_connection,
+) -> None:
+    """A caption that already routes is delivered now and never buffered, so a
+    later hashtag does not double-deliver it."""
+
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message("#Japan", message_id=12), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_awaited_once()
+    assert len(service._lookback) == 0
+
+
+def test_lookback_forwarded_media_survives_intervening_unmatched_text(
+    database_connection,
+) -> None:
+    """Forwarded media with an unmatched caption stays buffered through an
+    unrelated text message and is still claimable by a later hashtag."""
+
+    repositories = SqliteRepositories(database_connection)
+    service = _lookback_service(repositories)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_message("a forwarded caption", message_id=12),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("just chatting", message_id=13),
+                effective_chat=chat,
+            ),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(
+                effective_message=_text_message("#Japan", message_id=14), effective_chat=chat
+            ),
+            context,
+        )
+
+    asyncio.run(run())
+
+    bot.copy_message.assert_awaited_once()
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+
+
 def test_lookback_attaches_decision_to_pending_album(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     service = _lookback_service(repositories)

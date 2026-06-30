@@ -450,10 +450,12 @@ without a match are left untouched; conflicting destinations are recorded withou
 
 ### Hashtag look-back
 
-If media (a single item or an album) is posted in the source topic **without a caption** and a
-hashtag-only message follows it, Miki routes that recent media too — you don't have to caption at
-upload time. Because a bot cannot read history, this works only on media Miki already received: it
-remembers recent uncaptioned media in a small in-memory buffer that is both time-bounded
+If media (a single item or an album) lands in the source topic **without a route** — either no
+caption at all, or a caption that matches no hashtag/keyword/phrase (e.g. forwarded media still
+carrying its origin's unrelated caption) — and a hashtag-only message follows it, Miki routes that
+recent media too, so you don't have to caption at upload time. Because a bot cannot read history,
+this works only on media Miki already received: it
+remembers recent unrouted media in a small in-memory buffer that is both time-bounded
 (`LOOKBACK_TTL_SECONDS`) and count-bounded (`LOOKBACK_CAPACITY`) per topic, self-cleans on every
 access, and starts empty after a restart. Disable with `LOOKBACK_ENABLED=false` or `/set
 lookback_enabled false`.

@@ -282,6 +282,11 @@ class SortingService:
             return
         decision = self._matcher.decide(text)
         if decision.status == "unmatched":
+            # Media whose caption routes nowhere (e.g. forwarded media still
+            # carrying its origin's unrelated caption): remember it like
+            # uncaptioned media so a following hashtag-only message can claim it.
+            if self._live.lookback_enabled():
+                self._lookback.capture(chat.id, source_thread_id, (message,))
             return
         if decision.status == "conflict":
             self._record_skip(message, decision)
