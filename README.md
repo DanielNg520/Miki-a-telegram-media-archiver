@@ -178,7 +178,8 @@ make verify
 That runs the test suite, bytecode import compilation, dependency consistency checks, and
 `miki-doctor`.
 
-For Render/Koyeb webhook hosting, see `docs/hosted_webhook_deployment.md`.
+For all hosting (VPS/polling, DigitalOcean droplet, Render/Koyeb webhook), see
+`docs/deployment.md`.
 
 ## Command Reference (User Guide)
 
@@ -325,150 +326,33 @@ Bot requesters must also be listed in `REQUESTER_BOT_IDS`. Miki replies with a j
 | `/dead_letter_retry <id>` | Super admin | `/dead_letter_retry 5` | Requeues a single dead-lettered operation. |
 | `/audit_log [limit]` | Super admin | `/audit_log 50` | Shows recent audit events (limit 1–100, default 20). |
 
-## Topic and Route Management
+## How Miki works
 
-Set `ADMIN_USER_IDS`, restart Miki, and run `/topic_register <name>` inside each destination
-topic. Miki must be an administrator in that forum. Use `/topic_list` to inspect the registry.
+The command tables above are the complete operator interface. For the design behind them — routing
+precedence and conflicts, the search index and extractor, durable/idempotent delivery, hashtag
+look-back, batched album retrieval, reliability and recovery, runtime configuration, authorization
+tiers, and the integration contract — see **[docs/architecture.md](docs/architecture.md)**.
 
-Route commands:
+A few highlights:
 
-```text
-/hashtag_add <topic_id> <hashtag> [...]
-/hashtag_replace <topic_id> <hashtag>
-/hashtag_remove <topic_id> <hashtag>
-/hashtag_list [topic_id]
+- **Routing:** direct topic-forwarding pairs win over text rules; hashtags beat keywords/phrases;
+  rules pointing at different topics are a recorded conflict and copy nothing. Use
+  `/route_explain <caption>` to dry-run a decision, or `SORT_DRY_RUN=true` to test without sending.
+- **Hashtag look-back:** uncaptioned (or unrelatedly captioned) media followed by a hashtag-only
+  message is still routed, from a small time- and count-bounded per-topic buffer. Disable with
+  `LOOKBACK_ENABLED=false` or `/set lookback_enabled false`.
+- **Live config:** `/config` lists runtime knobs, `/set <key> <value>` changes one (validated, no
+  restart), `/reset <key>` reverts to the `.env` default. The source topic (`/source_set`) and
+  forwarding pairs (`/forward_*`) are likewise stored in the DB and applied live; their `.env`
+  values only seed first-run setup.
+- **Admin tiers:** `ADMIN_USER_IDS` are super admins (file-based, restart to change);
+  `/manager_add` grants a limited route-manager live. Gating is by user, not chat, so global
+  commands work in a DM with Miki.
 
-/keyword_add <topic_id> <keyword or quoted phrase>[, ...]
-/keyword_replace <topic_id> <keyword or quoted phrase>
-/keyword_remove <topic_id> <keyword or quoted phrase>
-/keyword_list [topic_id]
-/keyword_find <keyword or quoted phrase>
-```
+## Deployment & operations
 
-A **super admin** (a user in `ADMIN_USER_IDS`) can grant a **limited admin** with
-`/manager_add <user_id>` and revoke it with `/manager_remove <user_id>`. Limited
-admins can manage keyword/hashtag routes and view diagnostics across every chat,
-effective **immediately with no restart** (stored in the database and checked live),
-but they **cannot** change the source topic or forwarding, run backups/maintenance/
-reindex, register topics, or grant other admins — those stay super-admin-only.
-Editing `ADMIN_USER_IDS` in `.env` is only read at startup and **does** require a
-restart; that roster is deliberately file-based so it can never be locked out by a
-runtime change.
-
-The source topic (`/source_set`) and forwarding pairs (`/forward_add` /
-`/forward_remove`) are likewise stored in the database and applied live — change them
-from Telegram without restarting. The `.env` values `SOURCE_THREAD_ID` and
-`TOPIC_FORWARDING_JSON` seed the initial configuration on first run only.
-
-## Search Index
-
-Miki indexes media in active registered archive topics without downloading media files. The index
-contains Telegram message references, album identity, compact sender/source metadata, a short
-caption preview, and normalized hashtags, names, codes, configured keywords, and phrases.
-
-Edited captions replace stale tokens automatically. Administrators can rebuild older extractor
-versions in bounded batches with `/reindex [batch_size]`.
-
-## Durable Sorting
-
-Configured hashtags take priority over keywords and phrases. Conflicting destination topics are
-recorded without copying. Every delivery is persisted before Telegram is called, and repeated
-updates reuse the existing delivery record.
-
-Use `/route_explain <caption text>` to inspect a route decision. Set `SORT_DRY_RUN=true` to test
-matching without sending media.
-
-## Retrieval
-
-Set `REQUEST_CHAT_ID` to the request supergroup and `REQUEST_TOPIC_IDS` to the forum topics
-allowed to receive requests. Human users may
-submit:
-
-```text
-#request
-topic: Japan
-keywords: TOKYO, "Mount Fuji"
-match: any
-limit: 10
-```
-
-Bot requesters must also be listed in `REQUESTER_BOT_IDS`. Results are copied into the topic where
-the request was posted. Administrators can cancel active work with `/request_cancel <job_id>`.
-
-## Reliability
-
-Telegram copies use shared rate limiting and bounded retries. `retry_after` responses are honored;
-permanent failures are not repeatedly retried. Interrupted running jobs return to pending on the
-next startup.
-
-Inspect terminal failures with `/dead_letters` and requeue one with
-`/dead_letter_retry <dead_letter_id>`. Indexed messages Telegram can no longer copy are marked
-unavailable and excluded from later searches.
-
-## Program Integrations
-
-Configure signed clients with `INTEGRATION_CLIENTS_JSON`. Contract version 1 supports scoped route
-previews, library searches, and audit reads with HMAC-SHA256 signatures, timestamp/nonce replay
-protection, and per-client quotas.
-
-Phase 8 intentionally opens no network listener. See `docs/phase_8_interoperability.md` for the
-transport-neutral contract. Administrators can inspect recent events with `/audit_log [limit]`.
-
-## Operations
-
-Administrators can use `/health`, `/status`, `/maintenance`, and `/backup`.
-
-Local terminal operations are also available through `miki-ops`, modeled after the Archiver Suite
-ops console:
-
-```bash
-miki-ops health
-miki-ops watch --interval 3
-miki-ops status
-miki-ops doctor
-miki-ops backup
-miki-ops maintenance
-miki-ops logrotate
-miki-ops install
-miki-ops load
-miki-ops restart
-```
-
-A **daily automatic backup** runs in-process via the bot's job queue (no external
-cron needed). Each run takes a verified online SQLite snapshot (consistent under
-WAL, integrity-checked) into `BACKUP_DIRECTORY`, then prunes all but the
-`BACKUP_RETENTION_COUNT` most recent backups. Configure it with
-`BACKUP_DAILY_ENABLED`, `BACKUP_TIME` (24-hour `HH:MM`, UTC), and
-`BACKUP_RETENTION_COUNT`. A scheduled backup that fails is logged and counted in
-the `database_backup_failures` metric without interrupting the bot.
-
-Operational counters include Telegram retries and throttling, duplicate suppression,
-integration replay and quota rejection, and retrieval delivery totals. Review
-`docs/deployment.md`, `docs/phase_9_operations.md`, and `docs/release_readiness.md`
-before production rollout.
-
-## Behavior
-
-Miki ignores messages outside `SOURCE_THREAD_ID`, messages without media, and messages without
-text or a caption. It resolves registered hashtags, keywords, and phrases, persists the intended
-delivery, and copies the original message without downloading or re-uploading media. Messages
-without a match are left untouched; conflicting destinations are recorded without copying.
-
-### Hashtag look-back
-
-If media (a single item or an album) lands in the source topic **without a route** — either no
-caption at all, or a caption that matches no hashtag/keyword/phrase (e.g. forwarded media still
-carrying its origin's unrelated caption) — and a hashtag-only message follows it, Miki routes that
-recent media too, so you don't have to caption at upload time. Because a bot cannot read history,
-this works only on media Miki already received: it
-remembers recent unrouted media in a small in-memory buffer that is both time-bounded
-(`LOOKBACK_TTL_SECONDS`) and count-bounded (`LOOKBACK_CAPACITY`) per topic, self-cleans on every
-access, and starts empty after a restart. Disable with `LOOKBACK_ENABLED=false` or `/set
-lookback_enabled false`.
-
-### Runtime configuration
-
-The sorting/delivery and look-back knobs are configurable from chat with no restart: `/config`
-lists them, `/set <key> <value>` changes one (validated), `/reset <key>` reverts to the `.env`
-default. A poisoned or out-of-range stored value is discarded automatically and falls back to the
-default rather than disrupting delivery.
+Install/hosting (VPS/polling, DigitalOcean droplet, Render/Koyeb webhook), self-healing, health &
+metrics, backup/restore, upgrade/rollback, and the go-live checklist live in
+**[docs/deployment.md](docs/deployment.md)**. Day-to-day admin commands (`/health`, `/status`,
+`/maintenance`, `/backup`, `/dead_letters`, …) are in the command reference above; the same checks
+are available locally via `miki-doctor` and the `miki-ops` console.
