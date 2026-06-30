@@ -164,21 +164,76 @@ def test_human_request_copies_results_and_reports_summary(database_connection) -
     service = RetrievalService(_settings(), repositories)
     update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nmatch: any\nlimit: 10")
     bot = SimpleNamespace(
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=201)),
+        copy_messages=AsyncMock(
+            return_value=[
+                SimpleNamespace(message_id=202),
+                SimpleNamespace(message_id=203),
+            ]
+        ),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    # The standalone post is copied individually; the album members go out as one batch.
+    assert [call.kwargs["message_id"] for call in bot.copy_message.await_args_list] == [1]
+    assert bot.copy_messages.await_args_list[0].kwargs["message_ids"] == [2, 3]
+    replies = [call.args[0] for call in update.effective_message.reply_text.await_args_list]
+    assert replies[0].endswith("queued.")
+    assert "2 matched, 3 copied" in replies[-1]
+
+
+def test_album_batch_failure_falls_back_to_single_copies(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nmatch: any\nlimit: 10")
+    bot = SimpleNamespace(
         copy_message=AsyncMock(
             side_effect=[
                 SimpleNamespace(message_id=201),
                 SimpleNamespace(message_id=202),
                 SimpleNamespace(message_id=203),
             ]
-        )
+        ),
+        copy_messages=AsyncMock(side_effect=BadRequest("Too many requests")),
     )
 
     asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
 
+    # Standalone post plus the two album members each retried via copy_message.
     assert [call.kwargs["message_id"] for call in bot.copy_message.await_args_list] == [1, 2, 3]
-    replies = [call.args[0] for call in update.effective_message.reply_text.await_args_list]
-    assert replies[0].endswith("queued.")
-    assert "2 matched, 3 copied" in replies[-1]
+    assert "2 matched, 3 copied" in update.effective_message.reply_text.await_args_list[-1].args[0]
+
+
+def test_album_batch_seam_builds_real_copy_messages_call(database_connection) -> None:
+    """Seam test: drive a real telegram.Bot and capture the wire-level API call."""
+    from unittest.mock import patch
+
+    from telegram import Bot
+
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nmatch: any\nlimit: 10")
+
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_post(self: object, endpoint: str, data: dict, **_: object) -> object:
+        calls.append((endpoint, data))
+        if endpoint == "copyMessages":
+            return [{"message_id": 900 + i} for i in range(len(data["message_ids"]))]
+        return {"message_id": 800}
+
+    bot = Bot("123:abc")
+    with patch.object(Bot, "_post", fake_post):
+        asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    batch = next(data for endpoint, data in calls if endpoint == "copyMessages")
+    assert batch["from_chat_id"] == -200
+    assert batch["message_ids"] == [2, 3]
+    assert batch["message_thread_id"] == 50
+    assert "2 matched, 3 copied" in update.effective_message.reply_text.await_args_list[-1].args[0]
 
 
 def test_replayed_request_does_not_copy_again(database_connection) -> None:

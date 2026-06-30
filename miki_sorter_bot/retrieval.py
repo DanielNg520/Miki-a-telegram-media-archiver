@@ -238,80 +238,40 @@ class RetrievalService:
             request.limit,
         )
         summary = RetrievalSummary(matched=len({post.logical_post_key for post in posts}))
-        for post in posts:
+        for group in _group_by_logical_post(posts):
             current = self._repositories.get_job(job_id)
             if current is None or current.status == "cancelled":
                 summary.cancelled = True
                 break
-            item = self._repositories.ensure_retrieval_item(
-                job_id,
-                post.id,
-                destination_chat_id,
-                request_message.message_thread_id,
-            )
-            if item.status == "sent":
-                summary.skipped += 1
-                continue
-            if not post.is_available:
-                self._repositories.update_retrieval_item(item.id, "skipped", error="unavailable")
-                summary.unavailable += 1
-                continue
-            try:
-                copied = await self._delivery_executor.run(
-                    lambda: context.bot.copy_message(
-                        chat_id=destination_chat_id,
-                        from_chat_id=post.source_chat_id,
-                        message_id=post.source_message_id,
-                        message_thread_id=request_message.message_thread_id,
-                    ),
-                    retry_unknown_outcome=False,
+            pending: list[tuple[Any, Any]] = []
+            for post in group:
+                item = self._repositories.ensure_retrieval_item(
+                    job_id,
+                    post.id,
+                    destination_chat_id,
+                    request_message.message_thread_id,
                 )
-            except Exception as error:
-                failure = classify_error(error)
-                if failure.unavailable_source:
-                    self._repositories.mark_post_unavailable(post.id)
+                if item.status == "sent":
+                    summary.skipped += 1
+                    continue
+                if not post.is_available:
                     self._repositories.update_retrieval_item(
-                        item.id,
-                        "skipped",
-                        error="unavailable",
+                        item.id, "skipped", error="unavailable"
                     )
                     summary.unavailable += 1
-                else:
-                    category = "outcome_unknown" if failure.outcome_unknown else failure.category
-                    item_error = (
-                        "delivery outcome unknown after timeout"
-                        if failure.outcome_unknown
-                        else str(error)
-                    )
-                    self._repositories.update_retrieval_item(
-                        item.id,
-                        "failed",
-                        error=item_error,
-                    )
-                    summary.failed += 1
-                    self._repositories.add_dead_letter(
-                        job_id,
-                        "retrieve_copy",
-                        {"post_id": post.id, "request": job.payload},
-                        category,
-                        str(error),
-                    )
-                    if failure.outcome_unknown:
-                        self._repositories.increment_metric(
-                            "telegram_delivery_outcome_unknown",
-                            1,
-                        )
-                LOGGER.warning(
-                    "Retrieval copy failed",
-                    extra={"job_id": job_id, "post_id": post.id},
-                )
+                    continue
+                pending.append((post, item))
+            if not pending:
                 continue
-            self._repositories.update_retrieval_item(
-                item.id,
-                "sent",
-                destination_message_id=copied.message_id,
-            )
-            summary.copied += 1
+            if len(pending) > 1:
+                await self._deliver_album(
+                    job_id, job, pending, request_message, destination_chat_id, context, summary
+                )
+            else:
+                post, item = pending[0]
+                await self._deliver_single(
+                    job_id, job, post, item, request_message, destination_chat_id, context, summary
+                )
         if summary.copied:
             self._repositories.increment_metric("retrieval_items_copied", summary.copied)
         if summary.skipped:
@@ -339,6 +299,117 @@ class RetrievalService:
             },
         )
         await request_message.reply_text(summary.text(job_id))
+
+    async def _deliver_album(
+        self,
+        job_id: int,
+        job: JobRecord,
+        pending: list[tuple[Any, Any]],
+        request_message: Any,
+        destination_chat_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        summary: RetrievalSummary,
+    ) -> None:
+        """Deliver album members as a single grouped batch via copy_messages."""
+        from_chat_id = pending[0][0].source_chat_id
+        message_ids = [post.source_message_id for post, _ in pending]
+        try:
+            copied = await self._delivery_executor.run(
+                lambda: context.bot.copy_messages(
+                    chat_id=destination_chat_id,
+                    from_chat_id=from_chat_id,
+                    message_ids=message_ids,
+                    message_thread_id=request_message.message_thread_id,
+                ),
+                retry_unknown_outcome=False,
+            )
+        except Exception as error:
+            # Fall back to per-message copies so unavailable members are pinpointed
+            # rather than failing the whole album.
+            LOGGER.warning(
+                "Retrieval album copy failed; falling back to single copies",
+                extra={"job_id": job_id, "message_ids": message_ids, "error": str(error)},
+            )
+            for post, item in pending:
+                await self._deliver_single(
+                    job_id, job, post, item, request_message, destination_chat_id, context, summary
+                )
+            return
+        for (post, item), copied_message in zip(pending, copied):
+            self._repositories.update_retrieval_item(
+                item.id,
+                "sent",
+                destination_message_id=copied_message.message_id,
+            )
+            summary.copied += 1
+
+    async def _deliver_single(
+        self,
+        job_id: int,
+        job: JobRecord,
+        post: Any,
+        item: Any,
+        request_message: Any,
+        destination_chat_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        summary: RetrievalSummary,
+    ) -> None:
+        try:
+            copied = await self._delivery_executor.run(
+                lambda: context.bot.copy_message(
+                    chat_id=destination_chat_id,
+                    from_chat_id=post.source_chat_id,
+                    message_id=post.source_message_id,
+                    message_thread_id=request_message.message_thread_id,
+                ),
+                retry_unknown_outcome=False,
+            )
+        except Exception as error:
+            failure = classify_error(error)
+            if failure.unavailable_source:
+                self._repositories.mark_post_unavailable(post.id)
+                self._repositories.update_retrieval_item(
+                    item.id,
+                    "skipped",
+                    error="unavailable",
+                )
+                summary.unavailable += 1
+            else:
+                category = "outcome_unknown" if failure.outcome_unknown else failure.category
+                item_error = (
+                    "delivery outcome unknown after timeout"
+                    if failure.outcome_unknown
+                    else str(error)
+                )
+                self._repositories.update_retrieval_item(
+                    item.id,
+                    "failed",
+                    error=item_error,
+                )
+                summary.failed += 1
+                self._repositories.add_dead_letter(
+                    job_id,
+                    "retrieve_copy",
+                    {"post_id": post.id, "request": job.payload},
+                    category,
+                    str(error),
+                )
+                if failure.outcome_unknown:
+                    self._repositories.increment_metric(
+                        "telegram_delivery_outcome_unknown",
+                        1,
+                    )
+            LOGGER.warning(
+                "Retrieval copy failed",
+                extra={"job_id": job_id, "post_id": post.id},
+            )
+            return
+        self._repositories.update_retrieval_item(
+            item.id,
+            "sent",
+            destination_message_id=copied.message_id,
+        )
+        summary.copied += 1
 
     async def resume_job(
         self,
@@ -399,6 +470,19 @@ class RetrievalService:
         if len(matches) > 1:
             raise RequestValidationError("The requested topic name is ambiguous.")
         return matches[0]
+
+
+def _group_by_logical_post(posts: list[Any]) -> list[list[Any]]:
+    """Group consecutive posts that share a logical_post_key (album members)."""
+    groups: list[list[Any]] = []
+    sentinel = object()
+    current_key: object = sentinel
+    for post in posts:
+        if post.logical_post_key != current_key:
+            current_key = post.logical_post_key
+            groups.append([])
+        groups[-1].append(post)
+    return groups
 
 
 def _parse_keywords(value: str) -> tuple[str, ...]:
