@@ -24,8 +24,16 @@ requires every requested value; `any` requires at least one.
 
 Requests are accepted only when both are true:
 
-- The chat is `ARCHIVE_CHAT_ID`.
-- The current thread is listed in `REQUEST_TOPIC_IDS`.
+- The chat is the effective request chat (`REQUEST_CHAT_ID`, or `ARCHIVE_CHAT_ID` when blank).
+- The current thread is listed in the effective request topics (`REQUEST_TOPIC_IDS`).
+
+Both the request chat and the request topics are runtime-configurable and take effect immediately
+without a restart (the `.env` values are only defaults):
+
+- `/set request_chat_id <id>` / `/set request_topic_ids <id,...>` — from any chat, including a DM
+  with Miki. `/config` lists them; `/reset <key>` reverts to the `.env` default.
+- `/request_topic_add` / `/request_topic_remove` — run **inside** a forum topic (super-admin) to
+  toggle it as a request topic. `/request_topic_list` shows the current request chat and topics.
 
 Human users in those topics may request retrieval. Bot users must also appear in
 `REQUESTER_BOT_IDS`. This prevents an unrelated bot or a same-numbered topic in another chat from
@@ -37,7 +45,12 @@ Search is restricted to the requested active registered archive topic. Results a
 first and `limit` counts logical posts, not physical album members.
 
 An album is one logical search result. Tokens are aggregated across every member for `match: all`.
-After selection, all available members are copied in ascending Telegram message order.
+After selection, available members are delivered together as a batched media group (album) via
+`copyMessages`, in ascending Telegram message order, so the requester receives the album as one
+grouped post rather than separate messages. Groups larger than the Telegram album cap of 10 are
+split into successive batches; single-message results use a plain copy. If a batch times out with
+an unknown outcome, the whole group is deferred to job recovery rather than re-copied per member
+(which would duplicate the album).
 
 ## Durable Execution
 
@@ -60,7 +73,7 @@ administrator can cancel between result copies:
 Miki replies when the job is queued and sends a final summary containing:
 
 - Logical matches
-- Physical messages copied
+- Physical messages copied (with the count delivered as batched albums)
 - Unavailable records
 - Already completed/skipped members
 - Failed copies
