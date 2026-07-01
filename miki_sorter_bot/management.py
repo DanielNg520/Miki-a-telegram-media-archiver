@@ -529,6 +529,72 @@ class ManagementCommands:
         report = run_diagnostics(self._settings, self._repositories).format()
         await message.reply_text(report + self._webhook_section(context))
 
+    async def burner(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        """Drive the burner from Telegram: `/burner status` or enqueue a command."""
+
+        command = await self._burner_context(update)
+        if command is None:
+            return
+        message, chat, user = command
+
+        from miki_sorter_bot.burner import (
+            ENQUEUEABLE_COMMAND_KINDS,
+            BurnerCapability,
+        )
+
+        parts = (message.text or "").split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else "status"
+        tail = parts[2].strip() if len(parts) > 2 else ""
+
+        availability = BurnerCapability(self._settings, self._repositories).evaluate()
+
+        if sub == "status":
+            await message.reply_text(_format_burner_status(availability, self._repositories))
+            self._audit(user.id, "burner.status", "burner", "status")
+            return
+
+        if sub not in ENQUEUEABLE_COMMAND_KINDS:
+            allowed = ", ".join(sorted({"status", *ENQUEUEABLE_COMMAND_KINDS}))
+            await message.reply_text(f"Unknown burner command '{sub}'. Try: {allowed}")
+            return
+
+        # Fail-fast: never queue against an unavailable burner.
+        if not availability.available:
+            await message.reply_text(
+                f"Burner unavailable ({availability.reason}); '{sub}' was not queued."
+            )
+            self._audit(
+                user.id, "burner.enqueue", "burner_command", sub, outcome="denied"
+            )
+            return
+
+        payload: dict[str, object] = {
+            "echo": tail,
+            "chat_id": chat.id,
+            "thread_id": message.message_thread_id,
+            "requested_by": user.id,
+        }
+        key = f"burner:{sub}:{user.id}:{message.message_id}"
+        record = self._repositories.enqueue_burner_command(sub, key, payload, user.id)
+        await message.reply_text(
+            f"Queued burner command '{sub}' (#{record.id}). "
+            "You'll get the result here when it finishes."
+        )
+        self._audit(user.id, "burner.enqueue", "burner_command", str(record.id))
+
+    async def _burner_context(self, update: Update):
+        """Gate burner commands to operators or super admins."""
+
+        message = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if message is None or chat is None or user is None:
+            return None
+        if user.id not in self._settings.burner_operator_or_admin_ids:
+            await message.reply_text("You are not authorized to drive Miki's burner.")
+            return None
+        return message, chat, user
+
     @staticmethod
     def _webhook_section(context: ContextTypes.DEFAULT_TYPE) -> str:
         application = getattr(context, "application", None)
@@ -847,6 +913,18 @@ class ManagementCommands:
             resource_id=resource_id,
             outcome=outcome,
         )
+
+
+def _format_burner_status(availability, repositories: SqliteRepositories) -> str:
+    lines = [availability.summary()]
+    if availability.version is not None:
+        lines.append(f"version: {availability.version}")
+    if availability.last_error:
+        lines.append(f"last error: {availability.last_error}")
+    pending = len(repositories.list_pending_burner_commands(limit=1000))
+    if pending:
+        lines.append(f"pending commands: {pending}")
+    return "\n".join(lines)
 
 
 def _command_tail(text: str) -> str:

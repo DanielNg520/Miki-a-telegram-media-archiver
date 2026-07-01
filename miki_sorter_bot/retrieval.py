@@ -124,7 +124,7 @@ def parse_request(text: str, *, default_limit: int, max_limit: int) -> Retrieval
     limit_field = fields.get("limit")
     limit_explicit = limit_field is not None
     try:
-        limit = int(limit_field) if limit_explicit else default_limit
+        limit = int(limit_field) if limit_field is not None else default_limit
     except ValueError as error:
         raise RequestValidationError("limit must be an integer.") from error
     if limit < 1 or limit > max_limit:

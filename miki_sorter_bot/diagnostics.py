@@ -49,6 +49,7 @@ def run_diagnostics(settings: Settings, repositories: SqliteRepositories) -> Dia
         *_archive_checks(settings, repositories),
         *_retrieval_checks(settings),
         *_source_activity_checks(settings, repositories),
+        *_burner_checks(settings, repositories),
         *_operational_checks(repositories),
     ]
     return DiagnosticReport(tuple(checks))
@@ -180,6 +181,26 @@ def _source_activity_checks(
         "If posts were expected, verify Miki is running, privacy mode is off, "
         "and SOURCE_THREAD_ID is correct.",
     )
+
+
+def _burner_checks(
+    settings: Settings,
+    repositories: SqliteRepositories,
+) -> Iterable[DiagnosticCheck]:
+    # Import locally so the burner module never becomes a hard dependency of the
+    # core diagnostics path; the layer is entirely optional.
+    from miki_sorter_bot.burner import BurnerCapability
+
+    if not getattr(settings, "burner_configured", False):
+        yield DiagnosticCheck("ok", "burner", "Burner layer not configured (core-only mode).")
+        return
+
+    availability = BurnerCapability(settings, repositories).evaluate()
+    level = "ok" if availability.available else "warning"
+    message = availability.summary().removeprefix("burner: ")
+    if availability.last_error:
+        message = f"{message}; last error: {availability.last_error}"
+    yield DiagnosticCheck(level, "burner", message)
 
 
 def _human_level(level: str) -> str:

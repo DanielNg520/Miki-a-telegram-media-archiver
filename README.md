@@ -181,6 +181,10 @@ That runs the test suite, bytecode import compilation, dependency consistency ch
 For all hosting (VPS/polling, DigitalOcean droplet, Render/Koyeb webhook), see
 `docs/deployment.md`.
 
+For the optional user-account ("burner") enhancement layer — encrypted backup offload to Telegram,
+history backfill, and a forward-bridge for groups Miki can't join — see `docs/burner-layer.md`. It
+is fully capability-gated (absent by default) and runs as on-demand CLI (`miki-burner`) via cron.
+
 ## Command Reference (User Guide)
 
 This is the complete list of every command Miki understands. Send commands as normal Telegram
@@ -332,13 +336,15 @@ Bot requesters must also be listed in `REQUESTER_BOT_IDS`. Miki replies with a j
 | `/dead_letters` | Super admin | `/dead_letters` | Lists unresolved terminal failures (id, operation, error category, job). |
 | `/dead_letter_retry <id>` | Super admin | `/dead_letter_retry 5` | Requeues a single dead-lettered operation. |
 | `/audit_log [limit]` | Super admin | `/audit_log 50` | Shows recent audit events (limit 1–100, default 20). |
+| `/burner [status\|<kind>]` | Operator/Admin | `/burner status` | Burner-layer control (only if configured). `status` reports availability; other kinds enqueue a burner command. Gated by `BURNER_OPERATOR_USER_IDS` ∪ `ADMIN_USER_IDS`. See `docs/burner-layer.md`. |
 
 ## How Miki works
 
 The command tables above are the complete operator interface. For the design behind them — routing
 precedence and conflicts, the search index and extractor, durable/idempotent delivery, hashtag
 look-back, batched album retrieval, reliability and recovery, runtime configuration, authorization
-tiers, and the integration contract — see **[docs/architecture.md](docs/architecture.md)**.
+tiers, and the integration contract — see **[docs/architecture.md](docs/architecture.md)**. For a
+module/worker/seam navigation map of the codebase, see **[docs/codebase-map.md](docs/codebase-map.md)**.
 
 A few highlights:
 

@@ -194,6 +194,11 @@ restored DB, replace the primary, and restart. `Storage.restore_backup` performs
 restore and both integrity checks. Keep the previous primary until startup health passes. Never
 copy a live WAL database with ordinary file-copy commands — use this procedure.
 
+**Off-droplet backups (optional burner layer):** if the burner is configured, `miki-burner backup`
+pushes an encrypted, compressed snapshot into the archive group so the index survives loss of the
+droplet itself. It runs as an on-demand CLI (cron), separate from the bot process. Setup, the cron
+schedule, and the user-account restore runbook are in [burner-layer.md](burner-layer.md).
+
 ## Upgrade & rollback
 
 **Upgrade:** create and verify a backup → stop the process → install the new release + deps → start

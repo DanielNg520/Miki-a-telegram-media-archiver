@@ -8,6 +8,38 @@ from typing import Any, Protocol
 
 
 @dataclass(frozen=True, slots=True)
+class BurnerStatusRecord:
+    last_seen_at: str
+    session_valid: bool
+    capabilities: dict[str, Any]
+    version: str | None
+    last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BurnerBridgeRecord:
+    id: int
+    foreign_chat_id: int
+    source_thread_id: int
+    last_forwarded_id: int
+    is_active: bool
+    last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BurnerCommandRecord:
+    id: int
+    kind: str
+    status: str
+    idempotency_key: str
+    payload: dict[str, Any]
+    requested_by: int | None
+    result: dict[str, Any] | None
+    last_error: str | None
+    attempts: int
+
+
+@dataclass(frozen=True, slots=True)
 class TopicRecord:
     id: int
     chat_id: int
@@ -1418,6 +1450,310 @@ class SqliteRepositories:
             (source_chat_id, source_thread_id, since),
         ).fetchone()[0]
 
+    def record_burner_heartbeat(
+        self,
+        *,
+        session_valid: bool,
+        capabilities: dict[str, Any] | None = None,
+        version: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        capabilities_json = json.dumps(capabilities or {}, separators=(",", ":"))
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO burner_status
+                    (id, last_seen_at, session_valid, capabilities_json, version, last_error)
+                VALUES (1, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    session_valid = excluded.session_valid,
+                    capabilities_json = excluded.capabilities_json,
+                    version = excluded.version,
+                    last_error = excluded.last_error
+                """,
+                (int(session_valid), capabilities_json, version, last_error),
+            )
+
+    def get_burner_status(self) -> BurnerStatusRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT last_seen_at, session_valid, capabilities_json, version, last_error
+            FROM burner_status
+            WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            capabilities = json.loads(row["capabilities_json"])
+        except (json.JSONDecodeError, TypeError):
+            capabilities = {}
+        return BurnerStatusRecord(
+            last_seen_at=row["last_seen_at"],
+            session_valid=bool(row["session_valid"]),
+            capabilities=capabilities if isinstance(capabilities, dict) else {},
+            version=row["version"],
+            last_error=row["last_error"],
+        )
+
+    def enqueue_burner_command(
+        self,
+        kind: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        requested_by: int | None,
+    ) -> BurnerCommandRecord:
+        serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO burner_commands (kind, idempotency_key, payload_json, requested_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                """,
+                (kind, idempotency_key, serialized, requested_by),
+            )
+        record = self.get_burner_command_by_key(idempotency_key)
+        if record is None:
+            raise RuntimeError("enqueued burner command could not be read")
+        return record
+
+    def list_pending_burner_commands(self, limit: int = 50) -> list[BurnerCommandRecord]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("pending burner command limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            """
+            SELECT id, kind, status, idempotency_key, payload_json, requested_by,
+                   result_json, last_error, attempts
+            FROM burner_commands
+            WHERE status = 'pending'
+              AND datetime(available_at) <= datetime('now')
+            ORDER BY available_at, id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [_burner_command_record(row) for row in rows]
+
+    def claim_burner_command(self, command_id: int) -> bool:
+        """Atomically acquire a runnable burner command for exactly one worker."""
+
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE burner_commands
+                SET status = 'running', attempts = attempts + 1,
+                    last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND status IN ('pending', 'failed')
+                  AND datetime(available_at) <= datetime('now')
+                """,
+                (command_id,),
+            )
+        return cursor.rowcount == 1
+
+    def finish_burner_command(
+        self,
+        command_id: int,
+        status: str,
+        *,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("burner command must finish as completed, failed, or cancelled")
+        serialized = (
+            json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            if result is not None
+            else None
+        )
+        with self._connection:
+            self._connection.execute(
+                """
+                UPDATE burner_commands
+                SET status = ?, result_json = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (status, serialized, error, command_id),
+            )
+
+    def get_burner_command(self, command_id: int) -> BurnerCommandRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT id, kind, status, idempotency_key, payload_json, requested_by,
+                   result_json, last_error, attempts
+            FROM burner_commands
+            WHERE id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        return _burner_command_record(row) if row is not None else None
+
+    def get_burner_command_by_key(self, idempotency_key: str) -> BurnerCommandRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT id, kind, status, idempotency_key, payload_json, requested_by,
+                   result_json, last_error, attempts
+            FROM burner_commands
+            WHERE idempotency_key = ?
+            """,
+            (idempotency_key,),
+        ).fetchone()
+        return _burner_command_record(row) if row is not None else None
+
+    def list_unreported_burner_results(self, limit: int = 20) -> list[BurnerCommandRecord]:
+        rows = self._connection.execute(
+            """
+            SELECT id, kind, status, idempotency_key, payload_json, requested_by,
+                   result_json, last_error, attempts
+            FROM burner_commands
+            WHERE reported_at IS NULL
+              AND status IN ('completed', 'failed', 'cancelled')
+            ORDER BY id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [_burner_command_record(row) for row in rows]
+
+    def fail_stale_running_burner_commands(self, timeout_seconds: int) -> int:
+        """Reclaim commands stuck in 'running' past ``timeout_seconds``.
+
+        The burner runs as a separate (often on-demand) process, so a crash mid-
+        command would otherwise strand the row in 'running' forever. The always-on
+        bot reaps these on a time threshold — generous enough not to race a
+        legitimately slow handler — flipping them to 'failed' so the result
+        reporter surfaces the outcome. Idempotent commands can then be re-issued.
+        """
+
+        if timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be positive")
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE burner_commands
+                SET status = 'failed',
+                    last_error = 'burner worker did not finish (stale running command reclaimed)',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'running'
+                  AND datetime(updated_at) < datetime('now', ?)
+                """,
+                (f"-{timeout_seconds} seconds",),
+            )
+        return cursor.rowcount
+
+    def mark_burner_command_reported(self, command_id: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE burner_commands SET reported_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (command_id,),
+            )
+
+    def add_bridge(
+        self,
+        foreign_chat_id: int,
+        source_thread_id: int,
+        *,
+        created_by_user_id: int | None = None,
+    ) -> BurnerBridgeRecord:
+        """Register (or re-activate) a forward-bridge. Checkpoint stays at 0 so the
+        first poll seeds it to "now" — history is never bulk-forwarded."""
+
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO burner_bridges
+                    (foreign_chat_id, source_thread_id, created_by_user_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT (foreign_chat_id) DO UPDATE SET
+                    source_thread_id = excluded.source_thread_id,
+                    is_active = 1,
+                    last_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (foreign_chat_id, source_thread_id, created_by_user_id),
+            )
+        bridge = self.get_bridge(foreign_chat_id)
+        if bridge is None:
+            raise RuntimeError("bridge could not be read after insert")
+        return bridge
+
+    def remove_bridge(self, foreign_chat_id: int) -> bool:
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE burner_bridges
+                SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE foreign_chat_id = ? AND is_active = 1
+                """,
+                (foreign_chat_id,),
+            )
+        return cursor.rowcount == 1
+
+    def get_bridge(self, foreign_chat_id: int) -> BurnerBridgeRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT id, foreign_chat_id, source_thread_id, last_forwarded_id,
+                   is_active, last_error
+            FROM burner_bridges
+            WHERE foreign_chat_id = ?
+            """,
+            (foreign_chat_id,),
+        ).fetchone()
+        return _burner_bridge_record(row) if row is not None else None
+
+    def list_active_bridges(self) -> list[BurnerBridgeRecord]:
+        rows = self._connection.execute(
+            """
+            SELECT id, foreign_chat_id, source_thread_id, last_forwarded_id,
+                   is_active, last_error
+            FROM burner_bridges
+            WHERE is_active = 1
+            ORDER BY id
+            """
+        ).fetchall()
+        return [_burner_bridge_record(row) for row in rows]
+
+    def update_bridge_checkpoint(self, bridge_id: int, last_forwarded_id: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                """
+                UPDATE burner_bridges
+                SET last_forwarded_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (last_forwarded_id, bridge_id),
+            )
+
+    def disable_bridge(self, bridge_id: int, error: str) -> None:
+        with self._connection:
+            self._connection.execute(
+                """
+                UPDATE burner_bridges
+                SET is_active = 0, last_error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (error, bridge_id),
+            )
+
+    def max_indexed_message_id(self, source_chat_id: int, source_thread_id: int) -> int:
+        """Highest already-indexed message id for a (chat, topic); 0 if none.
+
+        Used as the ``min_id`` checkpoint so history backfill only reads messages
+        newer than what is already indexed.
+        """
+
+        row = self._connection.execute(
+            """
+            SELECT MAX(source_message_id) AS max_id
+            FROM posts
+            WHERE source_chat_id = ? AND source_thread_id = ?
+            """,
+            (source_chat_id, source_thread_id),
+        ).fetchone()
+        return int(row["max_id"]) if row and row["max_id"] is not None else 0
+
     def operational_status(self) -> dict[str, Any]:
         job_counts = {
             row["status"]: row["count"]
@@ -1570,6 +1906,32 @@ def _delivery_record(row: sqlite3.Row) -> DeliveryRecord:
         destination_message_id=row["destination_message_id"],
         status=row["status"],
         reason=row["reason"],
+    )
+
+
+def _burner_bridge_record(row: sqlite3.Row) -> BurnerBridgeRecord:
+    return BurnerBridgeRecord(
+        id=row["id"],
+        foreign_chat_id=row["foreign_chat_id"],
+        source_thread_id=row["source_thread_id"],
+        last_forwarded_id=row["last_forwarded_id"],
+        is_active=bool(row["is_active"]),
+        last_error=row["last_error"],
+    )
+
+
+def _burner_command_record(row: sqlite3.Row) -> BurnerCommandRecord:
+    result = row["result_json"]
+    return BurnerCommandRecord(
+        id=row["id"],
+        kind=row["kind"],
+        status=row["status"],
+        idempotency_key=row["idempotency_key"],
+        payload=json.loads(row["payload_json"]),
+        requested_by=row["requested_by"],
+        result=json.loads(result) if result else None,
+        last_error=row["last_error"],
+        attempts=row["attempts"],
     )
 
 

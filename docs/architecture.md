@@ -1,7 +1,9 @@
 # Architecture & Design Reference
 
 How Miki works internally and the design decisions behind it. For setup and commands see the
-[README](../README.md); for hosting see [deployment.md](deployment.md).
+[README](../README.md); for hosting see [deployment.md](deployment.md); for a module/worker/seam
+navigation map see [codebase-map.md](codebase-map.md). For the optional user-account ("burner")
+enhancement layer see [burner-layer.md](burner-layer.md).
 
 ## Overview
 
@@ -74,7 +76,7 @@ Album members keep separate message IDs (so each can be copied later) but share 
 key derived from chat + `media_group_id`, letting retrieval treat the album as one result while
 preserving member order.
 
-**Extractor (version 1)** retains hashtags, ALL-CAPS identifiers (≥2 letters), mixed letter-number
+**Extractor** (current version 4) retains hashtags, ALL-CAPS identifiers (≥2 letters), mixed letter-number
 codes (`RX7`, `A320`, `FC-2`), capitalized words not explained by sentence position, and exact
 configured keywords/phrases. Values are case-folded and deduplicated; the extractor is deterministic
 (no AI). Each post records its `extractor_version`; `/reindex [batch_size]` rebuilds older versions

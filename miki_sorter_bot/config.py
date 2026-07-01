@@ -202,6 +202,31 @@ class Settings(BaseSettings):
     backup_retention_count: int = Field(default=14, ge=1, alias="BACKUP_RETENTION_COUNT")
     routes: list[Route] = Field(default_factory=list, alias="ROUTES_JSON")
 
+    # --- Burner layer (optional; absence disables the whole layer) ---
+    telethon_api_id: int | None = Field(default=None, alias="TELETHON_API_ID")
+    telethon_api_hash: str = Field(default="", alias="TELETHON_API_HASH")
+    telethon_session: str = Field(default="", alias="TELETHON_SESSION")
+    burner_enabled: bool = Field(default=False, alias="BURNER_ENABLED")
+    burner_poll_interval_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+        alias="BURNER_POLL_INTERVAL_SECONDS",
+    )
+    burner_operator_user_ids: Annotated[frozenset[int], NoDecode] = Field(
+        default_factory=frozenset,
+        alias="BURNER_OPERATOR_USER_IDS",
+    )
+    # Phase 3 — backup offload to Telegram storage.
+    burner_backup_chat_id: int | None = Field(default=None, alias="BURNER_BACKUP_CHAT_ID")
+    burner_backup_thread_id: int | None = Field(default=None, alias="BURNER_BACKUP_THREAD_ID")
+    burner_backup_age_recipient: str = Field(default="", alias="BURNER_BACKUP_AGE_RECIPIENT")
+    burner_backup_local_retention: int = Field(
+        default=3,
+        ge=0,
+        alias="BURNER_BACKUP_LOCAL_RETENTION",
+    )
+
     @field_validator("routes", mode="before")
     @classmethod
     def parse_routes(cls, value: object) -> object:
@@ -258,6 +283,7 @@ class Settings(BaseSettings):
         "request_topic_ids",
         "requester_bot_ids",
         "telegram_notification_chat_ids",
+        "burner_operator_user_ids",
         mode="before",
     )
     @classmethod
@@ -268,12 +294,45 @@ class Settings(BaseSettings):
             return frozenset(int(item.strip()) for item in value.split(",") if item.strip())
         return value
 
-    @field_validator("request_chat_id", mode="before")
+    @field_validator(
+        "request_chat_id",
+        "telethon_api_id",
+        "burner_backup_chat_id",
+        "burner_backup_thread_id",
+        mode="before",
+    )
     @classmethod
     def parse_optional_integer(cls, value: object) -> object:
         if value in (None, ""):
             return None
         return value
+
+    @property
+    def burner_configured(self) -> bool:
+        """True when the burner credentials are present (api id/hash + session)."""
+
+        return bool(
+            self.burner_enabled
+            and self.telethon_api_id
+            and self.telethon_api_hash.strip()
+            and self.telethon_session.strip()
+        )
+
+    @property
+    def burner_operator_or_admin_ids(self) -> frozenset[int]:
+        """Users allowed to drive the burner: operators plus core admins."""
+
+        return self.burner_operator_user_ids | self.admin_user_ids
+
+    @property
+    def burner_backup_configured(self) -> bool:
+        """True when backup offload has a destination group and an age recipient."""
+
+        return bool(
+            self.burner_configured
+            and self.burner_backup_chat_id is not None
+            and self.burner_backup_age_recipient.strip()
+        )
 
     @field_validator("backup_time")
     @classmethod

@@ -230,6 +230,7 @@ def _run(settings: Settings) -> None:
     _schedule_daily_backup(application, settings, operations, repositories)
     _schedule_sanity_checks(application, settings, repositories)
     _schedule_job_recovery(application, settings, recovery)
+    _schedule_burner_result_reporting(application, settings, repositories)
     _schedule_webhook_reconcile(application, settings, webhook_supervisor)
     _add_management_handlers(application, management)
     # group=-1 runs before routing: every inbound update proves liveness without
@@ -390,6 +391,36 @@ def _schedule_job_recovery(
     )
 
 
+def _schedule_burner_result_reporting(
+    application: Application,
+    settings,
+    repositories,
+) -> None:
+    if not settings.burner_configured:
+        return
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Burner result reporting requested but JobQueue is unavailable.")
+        return
+
+    from miki_sorter_bot.burner_reporting import BurnerResultReporter
+
+    reporter = BurnerResultReporter(repositories)
+    application.bot_data["burner_reporter"] = reporter
+
+    async def report_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+        await reporter.run_once(context.bot)
+
+    interval = max(5, settings.burner_poll_interval_seconds)
+    job_queue.run_repeating(
+        report_tick,
+        interval=interval,
+        first=interval,
+        name="burner-result-reporting",
+    )
+    LOGGER.info("Scheduled burner result reporting", extra={"interval_seconds": interval})
+
+
 def _schedule_webhook_reconcile(
     application: Application,
     settings,
@@ -525,6 +556,7 @@ def _add_management_handlers(
         "reset": management.config_reset,
         "maintenance": management.maintenance,
         "backup": management.backup,
+        "burner": management.burner,
         "show_ids": show_ids,
         "where": show_ids,
     }

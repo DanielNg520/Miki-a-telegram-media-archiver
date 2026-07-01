@@ -287,6 +287,132 @@ MIGRATIONS = (
         );
         """,
     ),
+    Migration(
+        9,
+        "burner_status",
+        """
+        CREATE TABLE burner_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            session_valid INTEGER NOT NULL DEFAULT 0 CHECK (session_valid IN (0, 1)),
+            capabilities_json TEXT NOT NULL DEFAULT '{}',
+            version TEXT,
+            last_error TEXT
+        );
+        """,
+    ),
+    Migration(
+        10,
+        "burner_commands",
+        """
+        CREATE TABLE burner_commands (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (
+                kind IN ('status', 'noop', 'backfill', 'bridge_add',
+                         'bridge_remove', 'backup_now')
+            ),
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+            idempotency_key TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            requested_by INTEGER,
+            result_json TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+            available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_error TEXT,
+            reported_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX burner_commands_claim_idx
+            ON burner_commands (status, available_at, id);
+        CREATE INDEX burner_commands_report_idx
+            ON burner_commands (reported_at, status, id);
+        """,
+    ),
+    Migration(
+        11,
+        "posts_backfill_source_kind",
+        # SQLite cannot ALTER a CHECK constraint in place, so rebuild `posts` with
+        # 'backfill' added to source_kind. Foreign keys stay enabled and PRAGMA
+        # toggles are no-ops inside the migration transaction, so we cannot use the
+        # "disable FK" recipe. Instead: snapshot the child rows (post_tokens,
+        # retrieval_items) into temp tables, let DROP TABLE posts cascade-empty
+        # them, swap the rebuilt table in under the name "posts", then restore the
+        # children. Order matters — build/copy/drop/rename before restoring.
+        """
+        CREATE TEMP TABLE _posts_tokens_backup AS SELECT * FROM post_tokens;
+        CREATE TEMP TABLE _posts_retrieval_backup AS SELECT * FROM retrieval_items;
+
+        CREATE TABLE posts_rebuild_new (
+            id INTEGER PRIMARY KEY,
+            source_chat_id INTEGER NOT NULL,
+            source_thread_id INTEGER NOT NULL,
+            source_message_id INTEGER NOT NULL,
+            media_group_id TEXT,
+            media_type TEXT NOT NULL,
+            caption_preview TEXT,
+            extractor_version INTEGER NOT NULL DEFAULT 1,
+            is_available INTEGER NOT NULL DEFAULT 1 CHECK (is_available IN (0, 1)),
+            message_created_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            logical_post_key TEXT,
+            sender_user_id INTEGER,
+            sender_is_bot INTEGER NOT NULL DEFAULT 0 CHECK (sender_is_bot IN (0, 1)),
+            source_kind TEXT NOT NULL DEFAULT 'telegram'
+                CHECK (source_kind IN ('telegram', 'miki_copy', 'external_bot', 'backfill')),
+            UNIQUE (source_chat_id, source_message_id)
+        );
+
+        INSERT INTO posts_rebuild_new (
+            id, source_chat_id, source_thread_id, source_message_id, media_group_id,
+            media_type, caption_preview, extractor_version, is_available, message_created_at,
+            created_at, updated_at, logical_post_key, sender_user_id, sender_is_bot, source_kind
+        )
+        SELECT
+            id, source_chat_id, source_thread_id, source_message_id, media_group_id,
+            media_type, caption_preview, extractor_version, is_available, message_created_at,
+            created_at, updated_at, logical_post_key, sender_user_id, sender_is_bot, source_kind
+        FROM posts;
+
+        DROP TABLE posts;
+        ALTER TABLE posts_rebuild_new RENAME TO posts;
+
+        INSERT INTO post_tokens SELECT * FROM _posts_tokens_backup;
+        INSERT INTO retrieval_items SELECT * FROM _posts_retrieval_backup;
+        DROP TABLE _posts_tokens_backup;
+        DROP TABLE _posts_retrieval_backup;
+
+        CREATE INDEX posts_topic_time_idx
+            ON posts (source_chat_id, source_thread_id, message_created_at DESC);
+        CREATE INDEX posts_media_group_idx
+            ON posts (source_chat_id, media_group_id)
+            WHERE media_group_id IS NOT NULL;
+        CREATE INDEX posts_logical_post_idx
+            ON posts (source_chat_id, source_thread_id, logical_post_key);
+        CREATE INDEX posts_extractor_version_idx
+            ON posts (extractor_version, id);
+        """,
+    ),
+    Migration(
+        12,
+        "burner_bridges",
+        """
+        CREATE TABLE burner_bridges (
+            id INTEGER PRIMARY KEY,
+            foreign_chat_id INTEGER NOT NULL UNIQUE,
+            source_thread_id INTEGER NOT NULL CHECK (source_thread_id > 0),
+            last_forwarded_id INTEGER NOT NULL DEFAULT 0 CHECK (last_forwarded_id >= 0),
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+            last_error TEXT,
+            created_by_user_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
+    ),
 )
 
 
