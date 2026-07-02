@@ -4,8 +4,9 @@ Miki can drop a short, operator-authored message into a source topic on a
 cadence, deleting the previous copy first so only the newest reminder is ever
 visible. Two triggers drive it, whichever fires first:
 
-- **Count** — post a short debounce delay after the Nth media message in the
-  topic (an album counts as one message, not one per photo).
+- **Count** — after the Nth media message in the topic (an album counts as one
+  message, not one per photo), then a short quiet gap so the reminder lands
+  after the batch finishes rather than mid-send.
 - **Interval** — post once every configured number of minutes.
 
 Both are gated on *new activity*: a topic with no media since its last notice
@@ -36,8 +37,9 @@ from miki_sorter_bot.settings_registry import LiveSettings
 
 LOGGER = logging.getLogger(__name__)
 
-# Fixed debounce between crossing the media threshold and posting, matching the
-# "5 seconds after the 10th media" behaviour. Not operator-tunable by design.
+# Quiet gap required after the last media before the reminder posts. The timer
+# resets on every new media once the threshold is reached, so the reminder lands
+# after a batch/album finishes rather than mid-send. Not operator-tunable.
 POST_DELAY_SECONDS = 5.0
 
 # Runtime-settings KV key prefix for the last notice message id, per topic.
@@ -105,8 +107,12 @@ class PeriodicNoticeService:
         Called from the sorting hot path for every user media message observed
         in a source topic. An album (media group) arrives as several messages
         sharing ``group_id``; those collapse to a single count so the threshold
-        is in whole posts, not individual photos. Cheap and synchronous: at most
-        it schedules a single debounced post task.
+        is in whole posts, not individual photos.
+
+        Once the threshold is reached, the post is debounced: the timer resets on
+        every new media (album members included) and only fires after a quiet gap
+        (``post_delay_seconds``), so the reminder never cuts into a batch that is
+        still being sent. Cheap and synchronous.
         """
 
         if not self._live.notice_enabled():
@@ -118,17 +124,18 @@ class PeriodicNoticeService:
             state = _TopicState(last_post_at=self._clock())
             self._state[topic_id] = state
 
-        if group_id is not None and self._already_counted_group(state, group_id):
-            return
-        state.count += 1
+        # Album members after the first do not add to the count, but they still
+        # push back the debounce below so the post waits for the album to finish.
+        if group_id is None or not self._already_counted_group(state, group_id):
+            state.count += 1
 
         threshold = self._live.notice_media_threshold()
         if threshold <= 0 or state.count < threshold:
             return
-        # Arm once when crossing the threshold; a task already pending means the
-        # post is scheduled — further media just wait for the next cycle.
+        # Threshold reached: (re)arm a debounce that fires only after the *last*
+        # observed media, so a still-arriving batch/album is never interrupted.
         if state.post_task is not None and not state.post_task.done():
-            return
+            state.post_task.cancel()
         state.post_task = asyncio.ensure_future(self._post_after_delay(topic_id, context))
 
     def _already_counted_group(self, state: _TopicState, group_id: str) -> bool:

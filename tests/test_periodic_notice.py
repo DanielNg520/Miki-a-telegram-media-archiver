@@ -141,6 +141,26 @@ def test_album_members_count_as_one_message() -> None:
     assert len(bot.sent) == 1
 
 
+def test_debounce_resets_on_new_media_and_posts_once() -> None:
+    # More media after the threshold cancels the pending post and re-arms, so a
+    # still-arriving batch never triggers a mid-send reminder — and only one
+    # post results once the batch settles.
+    clock = FakeClock()
+    store = FakeStore({TEXT_KEY: "hi"})
+    bot = FakeBot()
+    service = _service(FakeLive(threshold=1), store, clock)
+
+    async def scenario() -> None:
+        service.on_media(7, _context(bot))  # arms post A
+        service.on_media(7, _context(bot))  # cancels A, arms B
+        service.on_media(7, _context(bot), group_id="album-1")  # cancels B, arms C
+        service.on_media(7, _context(bot), group_id="album-1")  # album member: re-arms
+        await _drain_tasks()
+
+    asyncio.run(scenario())
+    assert len(bot.sent) == 1
+
+
 def test_deletes_previous_before_posting_new() -> None:
     clock = FakeClock()
     store = FakeStore({TEXT_KEY: "hi"})
