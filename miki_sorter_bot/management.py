@@ -12,6 +12,7 @@ from miki_sorter_bot.config import Settings
 from miki_sorter_bot.diagnostics import run_diagnostics
 from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.operations import OperationsService
+from miki_sorter_bot.periodic_notice import PeriodicNoticeService
 from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.repositories import SqliteRepositories, normalize_mapping
 from miki_sorter_bot.settings_registry import LiveSettings, UnknownSettingError
@@ -30,6 +31,7 @@ class ManagementCommands:
         operations: OperationsService | None = None,
         recovery: JobRecoveryService | None = None,
         live_settings: LiveSettings | None = None,
+        notice: "PeriodicNoticeService | None" = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -38,6 +40,7 @@ class ManagementCommands:
         self._operations = operations
         self._recovery = recovery
         self._live = live_settings or LiveSettings(settings, repositories)
+        self._notice = notice
 
     async def topic_register(
         self,
@@ -563,9 +566,7 @@ class ManagementCommands:
             await message.reply_text(
                 f"Burner unavailable ({availability.reason}); '{sub}' was not queued."
             )
-            self._audit(
-                user.id, "burner.enqueue", "burner_command", sub, outcome="denied"
-            )
+            self._audit(user.id, "burner.enqueue", "burner_command", sub, outcome="denied")
             return
 
         payload: dict[str, object] = {
@@ -671,6 +672,96 @@ class ManagementCommands:
         else:
             await message.reply_text(f"{key} was already at its default ({default}).")
         self._audit(user.id, "config.reset", "runtime_setting", key)
+
+    async def notice_set(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        if self._notice is None:
+            await message.reply_text("Periodic notices are unavailable.")
+            return
+        raw = message.text or ""
+        parts = raw.split(maxsplit=1)
+        body = parts[1].strip() if len(parts) > 1 else ""
+        if not body:
+            await message.reply_text(
+                "Usage: /notice_set <message text>\n"
+                "Everything after the command (including line breaks) becomes the "
+                "notice. Enable it with /set periodic_notice_enabled true."
+            )
+            return
+        self._notice.set_text(body, user.id)
+        await message.reply_text(
+            "Notice text updated. It reposts after "
+            f"{self._live.notice_media_threshold()} media or every "
+            f"{self._live.notice_interval_minutes()} min, whichever comes first.\n\n"
+            f"Preview:\n{body}"
+        )
+        self._audit(user.id, "notice.set", "runtime_setting", "periodic_notice_text")
+
+    async def notice_show(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._authorized_context(update)
+        if command is None:
+            return
+        message, _, _ = command
+        if self._notice is None:
+            await message.reply_text("Periodic notices are unavailable.")
+            return
+        text = self._notice.get_text()
+        topics = ", ".join(str(t) for t in sorted(self._live.notice_topics())) or "(none)"
+        state = "on" if self._live.notice_enabled() else "off"
+        threshold = self._live.notice_media_threshold()
+        interval = self._live.notice_interval_minutes()
+        count_rule = f"every {threshold} media" if threshold > 0 else "count trigger off"
+        interval_rule = f"every {interval} min" if interval > 0 else "interval trigger off"
+        await message.reply_text(
+            f"Periodic notice: {state}\n"
+            f"Triggers: {count_rule}; {interval_rule} (whichever first, only on new media)\n"
+            f"Topics: {topics}\n"
+            f"Text:\n{text or '(not set — use /notice_set)'}"
+        )
+
+    async def notice_topic_add(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._toggle_notice_topic(update, add=True)
+
+    async def notice_topic_remove(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._toggle_notice_topic(update, add=False)
+
+    async def _toggle_notice_topic(self, update: Update, *, add: bool) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        thread_id = message.message_thread_id
+        if not thread_id:
+            verb = "post notices in" if add else "stop posting notices in"
+            await message.reply_text(
+                f"Run this command inside the forum topic you want Miki to {verb} "
+                "(or use /set periodic_notice_topics <id,...> from anywhere)."
+            )
+            return
+        current = self._live.notice_topics()
+        updated = current | {thread_id} if add else current - {thread_id}
+        if updated == current:
+            state = "already" if add else "not"
+            await message.reply_text(f"Topic {thread_id} is {state} a notice topic.")
+            return
+        rendered = ", ".join(str(topic_id) for topic_id in sorted(updated))
+        self._live.registry.set(
+            "periodic_notice_topics", rendered, self._live.settings, self._live.store, user.id
+        )
+        action = "added to" if add else "removed from"
+        await message.reply_text(
+            f"Topic {thread_id} {action} notice topics (effective immediately). "
+            f"Now: {rendered or '(none)'}."
+        )
+        self._audit(
+            user.id,
+            "notice_topic.add" if add else "notice_topic.remove",
+            "runtime_setting",
+            "periodic_notice_topics",
+        )
 
     async def maintenance(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         command = await self._admin_context(update)

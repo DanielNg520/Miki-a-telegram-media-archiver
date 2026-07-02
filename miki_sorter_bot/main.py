@@ -28,6 +28,7 @@ from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.integrations import IntegrationService
 from miki_sorter_bot.instance_lock import AlreadyRunningError, InstanceLock
 from miki_sorter_bot.management import ManagementCommands
+from miki_sorter_bot.periodic_notice import PeriodicNoticeService, make_tick_job
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.retrieval import RetrievalService
@@ -123,12 +124,14 @@ def _run(settings: Settings) -> None:
     )
     live_settings = LiveSettings(settings, repositories)
     indexing = IndexingService(settings, repositories)
+    notice = PeriodicNoticeService(settings, repositories, live_settings)
     sorting = SortingService(
         settings,
         repositories,
         indexing,
         delivery_executor,
         live_settings=live_settings,
+        notice=notice,
     )
     retrieval = RetrievalService(
         settings, repositories, delivery_executor, live_settings=live_settings
@@ -155,6 +158,7 @@ def _run(settings: Settings) -> None:
         operations,
         recovery,
         live_settings=live_settings,
+        notice=notice,
     )
     heartbeat = Heartbeat()
 
@@ -232,6 +236,7 @@ def _run(settings: Settings) -> None:
     _schedule_job_recovery(application, settings, recovery)
     _schedule_burner_result_reporting(application, settings, repositories)
     _schedule_webhook_reconcile(application, settings, webhook_supervisor)
+    _schedule_periodic_notice(application, notice)
     _add_management_handlers(application, management)
     # group=-1 runs before routing: every inbound update proves liveness without
     # consuming it for the sorting/indexing/retrieval groups.
@@ -366,6 +371,25 @@ def _schedule_sanity_checks(application: Application, settings, repositories) ->
         interval=interval_seconds,
         first=interval_seconds,
         name="sanity-check",
+    )
+
+
+def _schedule_periodic_notice(
+    application: Application,
+    notice: PeriodicNoticeService,
+) -> None:
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Periodic notice requested but JobQueue is unavailable.")
+        return
+    # A light 60s tick keeps the interval trigger fully live-configurable
+    # (the interval itself is re-read each tick); it no-ops when disabled or
+    # nothing is due, so the steady-state cost is one cheap wake per minute.
+    job_queue.run_repeating(
+        make_tick_job(notice),
+        interval=60,
+        first=60,
+        name="periodic-notice",
     )
 
 
@@ -554,6 +578,10 @@ def _add_management_handlers(
         "settings": management.config_show,
         "set": management.config_set,
         "reset": management.config_reset,
+        "notice_set": management.notice_set,
+        "notice_show": management.notice_show,
+        "notice_topic_add": management.notice_topic_add,
+        "notice_topic_remove": management.notice_topic_remove,
         "maintenance": management.maintenance,
         "backup": management.backup,
         "burner": management.burner,

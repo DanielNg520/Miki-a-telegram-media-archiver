@@ -28,6 +28,7 @@ from miki_sorter_bot.indexing import (
     media_type,
 )
 from miki_sorter_bot.lookback import CapturedMedia, RecentMediaBuffer
+from miki_sorter_bot.periodic_notice import PeriodicNoticeService
 from miki_sorter_bot.repositories import RouteMappingRecord, SqliteRepositories, TopicRecord
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
 from miki_sorter_bot.settings_registry import LiveSettings
@@ -112,10 +113,12 @@ class SortingService:
         indexing: IndexingService,
         delivery_executor: DeliveryExecutor | None = None,
         live_settings: LiveSettings | None = None,
+        notice: "PeriodicNoticeService | None" = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
         self._indexing = indexing
+        self._notice = notice
         self._delivery_executor = delivery_executor or DeliveryExecutor(
             retry_policy=RetryPolicy(),
             rate_limiter=RateLimiter(1000),
@@ -236,6 +239,19 @@ class SortingService:
                     "media_type": detected_media_type,
                 },
             )
+
+        # Count user media for the periodic-notice feature before the routing
+        # gate below, so notices can target any source topic (not only the one
+        # Miki sorts). Skip edits so a re-edited post is not double-counted.
+        if (
+            self._notice is not None
+            and getattr(update, "edited_message", None) is None
+            and chat.id == self._settings.source_chat_id
+            and source_thread_id is not None
+        ):
+            sender = getattr(message, "from_user", None)
+            if getattr(sender, "id", None) != context.bot.id:
+                self._notice.on_media(source_thread_id, context)
 
         forwarding_pair = self._forwarding_pair(chat.id, source_thread_id)
         is_primary_source = (
@@ -476,6 +492,8 @@ class SortingService:
         """Drain routable albums and cancel every timer before storage closes."""
 
         await self.flush_pending_albums(context)
+        if self._notice is not None:
+            self._notice.cancel_timers()
         dropped = len(self._pending_albums)
         self._pending_albums.clear()
         if dropped:

@@ -97,6 +97,19 @@ class Settings(BaseSettings):
         le=50,
         alias="LOOKBACK_CAPACITY",
     )
+    periodic_notice_enabled: bool = Field(default=False, alias="PERIODIC_NOTICE_ENABLED")
+    periodic_notice_media_threshold: int = Field(
+        default=10,
+        ge=0,
+        le=10000,
+        alias="PERIODIC_NOTICE_MEDIA_THRESHOLD",
+    )
+    periodic_notice_interval_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=10080,
+        alias="PERIODIC_NOTICE_INTERVAL_MINUTES",
+    )
     telegram_retry_attempts: int = Field(default=3, ge=1, le=10, alias="TELEGRAM_RETRY_ATTEMPTS")
     telegram_retry_base_delay: float = Field(default=0.5, ge=0, alias="TELEGRAM_RETRY_BASE_DELAY")
     telegram_retry_max_delay: float = Field(default=8.0, ge=0, alias="TELEGRAM_RETRY_MAX_DELAY")

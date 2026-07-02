@@ -225,6 +225,27 @@ with the same token (Telegram allows only one polling process).
 | `/request_topic_remove` | Super admin | `/request_topic_remove` | Run inside a topic to stop accepting `#request` there. |
 | `/request_topic_list` | Admin | `/request_topic_list` | Lists the request chat and the topic IDs currently accepting `#request`. |
 
+### Periodic notices
+
+Miki can keep one short reminder pinned-by-recency in a source topic: it deletes the previous copy
+and reposts, so only the newest is ever visible. Two triggers fire it, whichever comes first, and
+both only fire when new media has arrived since the last post (a quiet topic never churns):
+
+- **Count** — ~5 seconds after every _N_ media (`periodic_notice_media_threshold`, default 10).
+- **Interval** — at most once per _M_ minutes (`periodic_notice_interval_minutes`, default 60).
+
+| Command | Who | Example | What it does |
+| --- | --- | --- | --- |
+| `/notice_set <text>` | Super admin | `/notice_set 📌 Tag your posts with #category!` | Sets the reminder body. Everything after the command (including line breaks) is used. |
+| `/notice_show` | Admin | `/notice_show` | Shows the current text, on/off state, triggers, and target topics. |
+| `/notice_topic_add` | Super admin | `/notice_topic_add` | Run **inside** a topic to also post the notice there. Edits `periodic_notice_topics`, effective immediately. |
+| `/notice_topic_remove` | Super admin | `/notice_topic_remove` | Run inside a topic to stop posting the notice there. |
+
+Ships **off**: set the text with `/notice_set`, then enable with `/set periodic_notice_enabled true`.
+It starts targeting the main source topic; add others live with `/notice_topic_add`. Tune cadence
+with `/set periodic_notice_media_threshold <n>` and `/set periodic_notice_interval_minutes <m>` (0
+disables that trigger).
+
 Topic open/close/rename in Telegram is tracked automatically — closing a topic deactivates it
 (routing/indexing pause), reopening reactivates it, and renaming updates the stored name.
 

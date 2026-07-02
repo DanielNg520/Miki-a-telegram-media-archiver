@@ -172,7 +172,9 @@ class SettingsRegistry:
                 LOGGER.debug("Could not delete poisoned runtime setting %s", key)
             return spec.default(settings)
 
-    def set(self, key: str, raw: str, settings: Any, store: RuntimeStore, user_id: int | None) -> Any:
+    def set(
+        self, key: str, raw: str, settings: Any, store: RuntimeStore, user_id: int | None
+    ) -> Any:
         spec = self.require(key)
         value = spec.parse(raw)  # validates; raises ValueError on bad input
         store.set_runtime_setting(key, spec.render(value), user_id)
@@ -284,6 +286,41 @@ def default_registry() -> SettingsRegistry:
                 render_int_set,
                 lambda s: frozenset(getattr(s, "request_topic_ids", frozenset())),
             ),
+            SettingSpec(
+                "periodic_notice_enabled",
+                "notice",
+                "Post a recurring reminder into source topics (delete-then-repost). "
+                "Set the text with /notice_set.",
+                parse_bool,
+                render_bool,
+                lambda s: bool(getattr(s, "periodic_notice_enabled", False)),
+            ),
+            SettingSpec(
+                "periodic_notice_media_threshold",
+                "notice",
+                "Post ~5s after this many media in a topic. 0 disables the count trigger.",
+                bounded_int(0, 10000),
+                render_number,
+                lambda s: int(getattr(s, "periodic_notice_media_threshold", 10)),
+            ),
+            SettingSpec(
+                "periodic_notice_interval_minutes",
+                "notice",
+                "Also post at most once per this many minutes (if new media arrived). "
+                "0 disables the interval trigger.",
+                bounded_int(0, 10080),
+                render_number,
+                lambda s: int(getattr(s, "periodic_notice_interval_minutes", 60)),
+            ),
+            SettingSpec(
+                "periodic_notice_topics",
+                "notice",
+                "Forum topic IDs to post the notice in (comma-separated). Also editable "
+                "in-topic with /notice_topic_add and /notice_topic_remove.",
+                parse_int_set,
+                render_int_set,
+                lambda s: frozenset({int(getattr(s, "source_thread_id", 0))}) - {0},
+            ),
         ]
     )
 
@@ -347,3 +384,15 @@ class LiveSettings:
 
     def effective_request_chat_id(self) -> int:
         return int(self.get("request_chat_id"))
+
+    def notice_enabled(self) -> bool:
+        return bool(self.get("periodic_notice_enabled"))
+
+    def notice_media_threshold(self) -> int:
+        return int(self.get("periodic_notice_media_threshold"))
+
+    def notice_interval_minutes(self) -> int:
+        return int(self.get("periodic_notice_interval_minutes"))
+
+    def notice_topics(self) -> frozenset[int]:
+        return frozenset(self.get("periodic_notice_topics"))
