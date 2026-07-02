@@ -298,7 +298,8 @@ def default_registry() -> SettingsRegistry:
             SettingSpec(
                 "periodic_notice_media_threshold",
                 "notice",
-                "Post ~5s after this many media in a topic. 0 disables the count trigger.",
+                "Post ~5s after this many media messages in a topic (an album counts as "
+                "one). 0 disables the count trigger.",
                 bounded_int(0, 10000),
                 render_number,
                 lambda s: int(getattr(s, "periodic_notice_media_threshold", 10)),

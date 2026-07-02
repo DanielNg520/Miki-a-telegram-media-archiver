@@ -251,7 +251,9 @@ class SortingService:
         ):
             sender = getattr(message, "from_user", None)
             if getattr(sender, "id", None) != context.bot.id:
-                self._notice.on_media(source_thread_id, context)
+                # An album's members share media_group_id and count once.
+                group_id = str(media_group_id) if media_group_id else None
+                self._notice.on_media(source_thread_id, context, group_id=group_id)
 
         forwarding_pair = self._forwarding_pair(chat.id, source_thread_id)
         is_primary_source = (

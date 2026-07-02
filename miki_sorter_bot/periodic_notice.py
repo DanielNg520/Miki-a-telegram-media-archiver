@@ -4,7 +4,8 @@ Miki can drop a short, operator-authored message into a source topic on a
 cadence, deleting the previous copy first so only the newest reminder is ever
 visible. Two triggers drive it, whichever fires first:
 
-- **Count** — post a short debounce delay after the Nth media in the topic.
+- **Count** — post a short debounce delay after the Nth media message in the
+  topic (an album counts as one message, not one per photo).
 - **Interval** — post once every configured number of minutes.
 
 Both are gated on *new activity*: a topic with no media since its last notice
@@ -44,6 +45,12 @@ _LAST_MESSAGE_KEY = "periodic_notice_last_message_id"
 # Runtime-settings KV key holding the operator-authored notice body.
 TEXT_KEY = "periodic_notice_text"
 
+# An album (media group) arrives as several separate messages; we count it once.
+# Members of one album land within seconds, so a short remembering window with a
+# bounded size is enough to collapse them into a single "message with media".
+_GROUP_DEDUP_WINDOW_SECONDS = 300.0
+_GROUP_DEDUP_MAX = 128
+
 
 class RuntimeStore(Protocol):
     """Structural type: the KV slice this service persists into."""
@@ -63,6 +70,8 @@ class _TopicState:
     last_post_at: float = 0.0
     post_task: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # media_group_id -> last-seen time, so repeated album members count once.
+    recent_groups: dict[str, float] = field(default_factory=dict)
 
 
 class PeriodicNoticeService:
@@ -90,12 +99,14 @@ class PeriodicNoticeService:
         self._repositories.set_runtime_setting(TEXT_KEY, text, user_id)
 
     # -- count trigger (hot path) -------------------------------------------
-    def on_media(self, topic_id: int, context: Any) -> None:
-        """Record one media item in ``topic_id`` and arm the count trigger.
+    def on_media(self, topic_id: int, context: Any, group_id: str | None = None) -> None:
+        """Record one media *message* in ``topic_id`` and arm the count trigger.
 
         Called from the sorting hot path for every user media message observed
-        in a source topic. Cheap and synchronous: at most it schedules a single
-        debounced post task.
+        in a source topic. An album (media group) arrives as several messages
+        sharing ``group_id``; those collapse to a single count so the threshold
+        is in whole posts, not individual photos. Cheap and synchronous: at most
+        it schedules a single debounced post task.
         """
 
         if not self._live.notice_enabled():
@@ -106,6 +117,9 @@ class PeriodicNoticeService:
         if state is None:
             state = _TopicState(last_post_at=self._clock())
             self._state[topic_id] = state
+
+        if group_id is not None and self._already_counted_group(state, group_id):
+            return
         state.count += 1
 
         threshold = self._live.notice_media_threshold()
@@ -116,6 +130,27 @@ class PeriodicNoticeService:
         if state.post_task is not None and not state.post_task.done():
             return
         state.post_task = asyncio.ensure_future(self._post_after_delay(topic_id, context))
+
+    def _already_counted_group(self, state: _TopicState, group_id: str) -> bool:
+        """True if this album was seen recently; records it for next time.
+
+        Prunes entries older than the dedup window and caps the map size so a
+        long-lived, busy topic cannot accumulate group ids without bound.
+        """
+
+        now = self._clock()
+        recent = state.recent_groups
+        if recent:
+            stale = [g for g, seen in recent.items() if now - seen > _GROUP_DEDUP_WINDOW_SECONDS]
+            for g in stale:
+                del recent[g]
+        seen_before = group_id in recent
+        recent[group_id] = now
+        if len(recent) > _GROUP_DEDUP_MAX:
+            # Drop the oldest entries down to the cap.
+            for g in sorted(recent, key=recent.__getitem__)[: len(recent) - _GROUP_DEDUP_MAX]:
+                del recent[g]
+        return seen_before
 
     async def _post_after_delay(self, topic_id: int, context: Any) -> None:
         try:

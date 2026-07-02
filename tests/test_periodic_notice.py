@@ -120,6 +120,27 @@ def test_count_trigger_posts_after_threshold() -> None:
     assert bot.sent[0]["text"] == "Tag your posts!"
 
 
+def test_album_members_count_as_one_message() -> None:
+    clock = FakeClock()
+    store = FakeStore({TEXT_KEY: "Tag your posts!"})
+    bot = FakeBot()
+    service = _service(FakeLive(threshold=2), store, clock)
+
+    async def scenario() -> None:
+        # A 5-photo album (same media_group_id) counts once -> below threshold.
+        for _ in range(5):
+            service.on_media(7, _context(bot), group_id="album-1")
+        await _drain_tasks()
+        assert bot.sent == []
+
+        # A second distinct post reaches the threshold of 2 messages.
+        service.on_media(7, _context(bot), group_id="album-2")
+        await _drain_tasks()
+
+    asyncio.run(scenario())
+    assert len(bot.sent) == 1
+
+
 def test_deletes_previous_before_posting_new() -> None:
     clock = FakeClock()
     store = FakeStore({TEXT_KEY: "hi"})

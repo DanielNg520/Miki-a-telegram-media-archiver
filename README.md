@@ -231,7 +231,7 @@ Miki can keep one short reminder pinned-by-recency in a source topic: it deletes
 and reposts, so only the newest is ever visible. Two triggers fire it, whichever comes first, and
 both only fire when new media has arrived since the last post (a quiet topic never churns):
 
-- **Count** — ~5 seconds after every _N_ media (`periodic_notice_media_threshold`, default 10).
+- **Count** — ~5 seconds after every _N_ media messages (`periodic_notice_media_threshold`, default 10; an album counts as one message).
 - **Interval** — at most once per _M_ minutes (`periodic_notice_interval_minutes`, default 60).
 
 | Command | Who | Example | What it does |
