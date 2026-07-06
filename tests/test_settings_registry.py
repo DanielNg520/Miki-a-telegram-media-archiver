@@ -23,7 +23,9 @@ class FakeStore:
     def get_runtime_setting(self, key: str) -> str | None:
         return self.data.get(key)
 
-    def set_runtime_setting(self, key: str, value: str, updated_by_user_id: int | None = None) -> None:
+    def set_runtime_setting(
+        self, key: str, value: str, updated_by_user_id: int | None = None
+    ) -> None:
         self.data[key] = value
 
     def delete_runtime_setting(self, key: str) -> bool:

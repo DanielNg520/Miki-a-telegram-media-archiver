@@ -748,7 +748,32 @@ class SortingService:
             destination_message_id=copied.message_id,
         )
         if self._live.send_confirmation():
-            await message.reply_text(f"Sorted to {topic.name}.", quote=True)
+            await self._confirm_delivery(message, topic)
+
+    async def _confirm_delivery(self, message: Any, topic: TopicRecord) -> None:
+        """Best-effort "Sorted to X." reply after a committed delivery.
+
+        The job is already completed by the time this runs, so a confirmation
+        failure (recovered job replaying without the original Telegram message,
+        deleted source message, missing permissions) must never bubble up and
+        mark the finished delivery as failed.
+        """
+
+        reply = getattr(message, "reply_text", None)
+        if reply is None:
+            return
+        try:
+            await reply(f"Sorted to {topic.name}.", do_quote=True)
+        except Exception as error:
+            self._repositories.increment_metric("sort_confirmation_failures", 1)
+            LOGGER.warning(
+                "Could not send sort confirmation (delivery already committed)",
+                extra={
+                    "message_id": getattr(message, "message_id", None),
+                    "destination_thread_id": topic.thread_id,
+                    "error": str(error),
+                },
+            )
 
     def _decide_album_text(self, pending: PendingAlbum) -> SortDecision | None:
         text = _album_text(tuple(pending.messages.values()))
@@ -964,7 +989,7 @@ class SortingService:
             )
             return AlbumDeliveryOutcome.OUTCOME_UNKNOWN
         if self._live.send_confirmation():
-            await messages[0].reply_text(f"Sorted to {topic.name}.", quote=True)
+            await self._confirm_delivery(messages[0], topic)
         return AlbumDeliveryOutcome.DELIVERED
 
     def _record_skip(self, message: Any, decision: SortDecision) -> None:

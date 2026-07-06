@@ -208,9 +208,7 @@ def run_backup_offload(
     caption = f"miki index backup\n{artifact.name}\n{size} bytes\n{stamp}"
     message_id = uploader.upload(artifact, caption=caption)  # type: ignore[attr-defined]
 
-    pruned = prune_local_backups(
-        settings.backup_directory, settings.burner_backup_local_retention
-    )
+    pruned = prune_local_backups(settings.backup_directory, settings.burner_backup_local_retention)
     logger.info(
         "Backup offloaded: %s (%s bytes), message %s, pruned %d local artifact(s).",
         artifact.name,

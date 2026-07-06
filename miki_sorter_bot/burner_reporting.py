@@ -34,9 +34,7 @@ class BurnerResultReporter:
     async def run_once(self, bot: object) -> int:
         """Reclaim stale running commands, then report all unreported terminal ones."""
 
-        reclaimed = self._repositories.fail_stale_running_burner_commands(
-            self._stale_after_seconds
-        )
+        reclaimed = self._repositories.fail_stale_running_burner_commands(self._stale_after_seconds)
         if reclaimed:
             logger.warning("Reclaimed %d stale running burner command(s).", reclaimed)
         commands = self._repositories.list_unreported_burner_results(self._limit)

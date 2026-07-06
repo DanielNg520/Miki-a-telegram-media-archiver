@@ -86,9 +86,7 @@ def bridge_once(
     """Forward new media from each active bridge into its Miki source topic."""
 
     flood_types = flood_wait_types if flood_wait_types is not None else _default_flood_wait_types()
-    forbid_types = (
-        noforwards_types if noforwards_types is not None else _default_noforwards_types()
-    )
+    forbid_types = noforwards_types if noforwards_types is not None else _default_noforwards_types()
     outcome = BridgeOutcome()
 
     for bridge in repositories.list_active_bridges():

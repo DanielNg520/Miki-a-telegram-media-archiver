@@ -54,9 +54,7 @@ def _forwarded_photo_update() -> Update:
                 "from": {"id": 10, "is_bot": False, "first_name": "U"},
                 "message_thread_id": 5,
                 "caption": "a forwarded caption",
-                "photo": [
-                    {"file_id": "f1", "file_unique_id": "u1", "width": 90, "height": 90}
-                ],
+                "photo": [{"file_id": "f1", "file_unique_id": "u1", "width": 90, "height": 90}],
                 "forward_origin": {
                     "type": "user",
                     "date": _epoch(2026, 6, 1),

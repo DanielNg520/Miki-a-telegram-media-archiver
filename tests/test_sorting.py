@@ -18,6 +18,7 @@ def _settings(
     *,
     dry_run: bool = False,
     forwarding_pairs: tuple[TopicForwardingPair, ...] = (),
+    send_confirmation: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         source_chat_id=-100,
@@ -25,7 +26,7 @@ def _settings(
         archive_chat_id=-200,
         topic_forwarding_pairs=forwarding_pairs,
         sort_dry_run=dry_run,
-        send_confirmation=False,
+        send_confirmation=send_confirmation,
     )
 
 
@@ -1930,3 +1931,48 @@ def test_runtime_dry_run_override_skips_delivery(database_connection) -> None:
 
     bot.copy_message.assert_not_awaited()
     assert repositories.get_delivery(-100, 12, -200, 9).status == "skipped"
+
+
+def test_confirmation_replies_with_do_quote(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    indexing = SimpleNamespace(index_copy=Mock(return_value=True))
+    service = SortingService(_settings(send_confirmation=True), repositories, indexing)
+    message = _message("#Japan")
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    )
+    update = SimpleNamespace(
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    message.reply_text.assert_awaited_once_with("Sorted to Japan.", do_quote=True)
+    assert repositories.get_delivery(-100, 12, -200, 9).status == "sent"
+
+
+def test_confirmation_failure_never_fails_the_committed_delivery(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    indexing = SimpleNamespace(index_copy=Mock(return_value=True))
+    service = SortingService(_settings(send_confirmation=True), repositories, indexing)
+    message = _message("#Japan")
+    # Mirrors PTB >= 21 rejecting the removed `quote` kwarg, or any Telegram error.
+    message.reply_text = AsyncMock(side_effect=TypeError("unexpected keyword argument 'quote'"))
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    )
+    update = SimpleNamespace(
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+    delivery = repositories.get_delivery(-100, 12, -200, 9)
+    assert delivery.status == "sent"
+    assert repositories.metrics_snapshot()["sort_confirmation_failures"] == 1

@@ -120,3 +120,40 @@ def test_recovery_coordinator_dead_letters_invalid_payload(database_connection) 
 
     assert repositories.get_job(job.id).status == "failed"
     assert repositories.list_dead_letters()[0]["operation"] == "job_recovery"
+
+
+def test_recovered_sort_job_completes_with_confirmations_enabled(database_connection) -> None:
+    """A recovered job replays without the original Telegram message, so the
+    confirmation step must not flip the committed delivery back to failed."""
+
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    settings = _settings()
+    settings.send_confirmation = True
+    sorting = SortingService(
+        settings,
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=False)),
+    )
+    recovery = JobRecoveryService(repositories, sorting, RetrievalService(settings, repositories))
+    job = repositories.enqueue(
+        "sort",
+        "sort:-100:12:-200:9",
+        {
+            "source_chat_id": -100,
+            "source_message_id": 12,
+            "destination_chat_id": -200,
+            "destination_thread_id": 9,
+            "reason": "forwarding-pair:5->9",
+        },
+    )
+    bot = SimpleNamespace(
+        id=99,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=201)),
+    )
+
+    recovered = asyncio.run(recovery.run_once(SimpleNamespace(bot=bot)))
+
+    assert recovered == 1
+    assert repositories.get_job(job.id).status == "completed"
+    assert repositories.list_dead_letters() == []

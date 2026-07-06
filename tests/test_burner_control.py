@@ -182,9 +182,7 @@ def test_reporter_reclaims_and_reports_stale_command(database_connection) -> Non
     _backdate_updated_at(database_connection, stuck.id, "-1 hour")
 
     bot = SimpleNamespace(send_message=AsyncMock())
-    sent = asyncio.run(
-        BurnerResultReporter(repositories, stale_after_seconds=60).run_once(bot)
-    )
+    sent = asyncio.run(BurnerResultReporter(repositories, stale_after_seconds=60).run_once(bot))
 
     assert sent == 1
     assert "failed" in bot.send_message.await_args.kwargs["text"]

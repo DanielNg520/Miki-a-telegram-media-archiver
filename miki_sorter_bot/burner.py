@@ -261,9 +261,7 @@ def _handle_bridge_add(
     foreign_chat_id = payload.get("foreign_chat_id")
     source_thread_id = payload.get("source_thread_id")
     if not isinstance(foreign_chat_id, int) or not isinstance(source_thread_id, int):
-        raise ValueError(
-            "bridge_add requires integer 'foreign_chat_id' and 'source_thread_id'"
-        )
+        raise ValueError("bridge_add requires integer 'foreign_chat_id' and 'source_thread_id'")
     requested_by = payload.get("requested_by")
     bridge = repositories.add_bridge(
         foreign_chat_id,
@@ -438,7 +436,9 @@ def _cli_backup(settings: Settings) -> None:
     )
 
 
-def _cli_backfill(settings: Settings, *, topic_id: int, chat_id: int | None, limit: int | None) -> None:
+def _cli_backfill(
+    settings: Settings, *, topic_id: int, chat_id: int | None, limit: int | None
+) -> None:
     from miki_sorter_bot.burner_backfill import run_backfill
 
     storage = Storage(settings.database_path)
@@ -538,9 +538,7 @@ def main() -> None:
         "bridge-remove", help="deactivate a forward-bridge"
     )
     bridge_remove_parser.add_argument("foreign_chat_id", type=int, help="foreign group chat id")
-    subparsers.add_parser(
-        "bridge-once", help="forward new media for all active bridges, then exit"
-    )
+    subparsers.add_parser("bridge-once", help="forward new media for all active bridges, then exit")
     subparsers.add_parser("once", help="one heartbeat + command drain, then exit")
     subparsers.add_parser("run", help="persistent heartbeat + command-drain loop")
     args = parser.parse_args()

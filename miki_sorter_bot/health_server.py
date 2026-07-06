@@ -133,8 +133,7 @@ def _webhook_metrics(webhook: Any) -> list[str]:
         f"miki_webhook_pending_updates {int(webhook.get('pending_update_count', 0))}",
         f"miki_webhook_seconds_since_update {int(webhook.get('seconds_since_update', 0))}",
         f"miki_webhook_reconciliations {int(webhook.get('reconciliations', 0))}",
-        "miki_webhook_breaker_open "
-        f"{int(webhook.get('breaker_state') == 'open')}",
+        f"miki_webhook_breaker_open {int(webhook.get('breaker_state') == 'open')}",
         "miki_webhook_last_error_age_seconds "
         f"{int(last_error_age) if last_error_age is not None else -1}",
     ]

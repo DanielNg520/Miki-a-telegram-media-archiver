@@ -187,8 +187,7 @@ class WebhookHealth:
             f"- webhook url match: {'yes' if self.url_matches else 'NO'}",
             f"- webhook pending updates: {self.pending_update_count}",
             f"- seconds since last update: {round(self.seconds_since_update)}",
-            f"- self-heal breaker: {self.breaker_state} "
-            f"(reconciliations={self.reconciliations})",
+            f"- self-heal breaker: {self.breaker_state} (reconciliations={self.reconciliations})",
         ]
         if self.last_error_message:
             age = (

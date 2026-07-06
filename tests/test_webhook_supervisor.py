@@ -198,7 +198,9 @@ def test_reconcile_is_noop_when_registration_matches() -> None:
 def test_reconcile_heals_on_recent_delivery_errors() -> None:
     now = datetime(2026, 6, 24, tzinfo=UTC)
     bot = _bot(
-        _webhook_info(pending=3, last_error_message="boom", last_error_date=now - timedelta(seconds=10))
+        _webhook_info(
+            pending=3, last_error_message="boom", last_error_date=now - timedelta(seconds=10)
+        )
     )
     sup = _supervisor(bot, now=now)
     asyncio.run(sup.reconcile())

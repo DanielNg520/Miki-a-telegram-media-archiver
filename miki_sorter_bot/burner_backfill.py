@@ -134,9 +134,7 @@ def backfill_topic(
 
     indexer = MessageIndexer(repositories, bot_id)
     start_min_id = (
-        min_id
-        if min_id is not None
-        else repositories.max_indexed_message_id(chat_id, topic_id)
+        min_id if min_id is not None else repositories.max_indexed_message_id(chat_id, topic_id)
     )
     flood_types = flood_wait_types if flood_wait_types is not None else _default_flood_wait_types()
 
