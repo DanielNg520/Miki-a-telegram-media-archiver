@@ -238,18 +238,44 @@ def _handle_backfill(
 ) -> dict[str, object]:
     from miki_sorter_bot.burner_backfill import run_backfill
 
-    topic_id = payload.get("topic_id")
-    if not isinstance(topic_id, int):
-        raise ValueError("backfill requires an integer 'topic_id' in the payload")
-    chat_id = payload.get("backfill_chat_id")
-    limit = payload.get("limit")
-    outcome = run_backfill(
-        settings,
-        repositories,
-        topic_id=topic_id,
-        chat_id=chat_id if isinstance(chat_id, int) else None,
-        limit=limit if isinstance(limit, int) else None,
+    from miki_sorter_bot.burner_backfill import (
+        DEFAULT_JITTER_SECONDS,
+        DEFAULT_LIMIT,
+        DEFAULT_MAX_MINUTES,
+        run_backfill_all,
     )
+
+    # 'topic_id' is now OPTIONAL: omit it (or pass null) to sweep every active
+    # archive topic automatically.
+    topic_id = payload.get("topic_id")
+    if topic_id is not None and not isinstance(topic_id, int):
+        raise ValueError("backfill 'topic_id' must be an integer or omitted")
+    chat_id = payload.get("backfill_chat_id")
+    chat_id = chat_id if isinstance(chat_id, int) else None
+    # Bounded by default even for a remotely-issued command: an omitted 'limit'
+    # or 'max_minutes' falls back to the safe envelope, never to unbounded. A
+    # value of 0 explicitly disables that one cap (the other still applies).
+    limit = payload.get("limit")
+    limit = limit if isinstance(limit, int) else DEFAULT_LIMIT
+    max_minutes = payload.get("max_minutes")
+    max_minutes = max_minutes if isinstance(max_minutes, (int, float)) else DEFAULT_MAX_MINUTES
+    jitter = payload.get("jitter")
+    jitter = float(jitter) if isinstance(jitter, (int, float)) else DEFAULT_JITTER_SECONDS
+
+    common = dict(
+        chat_id=chat_id,
+        limit=limit if limit else None,
+        max_minutes=max_minutes if max_minutes else None,
+        jitter=jitter,
+    )
+    if topic_id is None:
+        outcomes = run_backfill_all(settings, repositories, **common)
+        return {
+            "topics": [o.as_dict() for o in outcomes],
+            "topic_count": len(outcomes),
+            "indexed_total": sum(o.indexed for o in outcomes),
+        }
+    outcome = run_backfill(settings, repositories, topic_id=topic_id, **common)
     return outcome.as_dict()
 
 
@@ -437,23 +463,65 @@ def _cli_backup(settings: Settings) -> None:
 
 
 def _cli_backfill(
-    settings: Settings, *, topic_id: int, chat_id: int | None, limit: int | None
+    settings: Settings,
+    *,
+    topic_id: int | None,
+    chat_id: int | None,
+    limit: int | None,
+    max_minutes: float | None,
+    jitter: float,
 ) -> None:
-    from miki_sorter_bot.burner_backfill import run_backfill
+    from miki_sorter_bot.burner_backfill import run_backfill, run_backfill_all
 
     storage = Storage(settings.database_path)
     try:
         repositories = storage.open()
-        outcome = run_backfill(
-            settings, repositories, topic_id=topic_id, chat_id=chat_id, limit=limit
-        )
+        if topic_id is None:
+            # No topic given -> sweep every active archive topic automatically.
+            outcomes = run_backfill_all(
+                settings,
+                repositories,
+                chat_id=chat_id,
+                limit=limit,
+                max_minutes=max_minutes,
+                jitter=jitter,
+            )
+        else:
+            outcomes = [
+                run_backfill(
+                    settings,
+                    repositories,
+                    topic_id=topic_id,
+                    chat_id=chat_id,
+                    limit=limit,
+                    max_minutes=max_minutes,
+                    jitter=jitter,
+                )
+            ]
     finally:
         storage.close()
-    print(
-        f"Backfill chat {outcome.chat_id} topic {outcome.topic_id}: "
-        f"scanned {outcome.scanned}, indexed {outcome.indexed} "
-        f"(min_id {outcome.start_min_id} -> {outcome.last_message_id})."
-    )
+
+    if not outcomes:
+        print("Backfill: no active archive topics to index.")
+        return
+    total_indexed = 0
+    incomplete = False
+    for outcome in outcomes:
+        total_indexed += outcome.indexed
+        incomplete = incomplete or outcome.stop_reason in ("limit", "time", "flood_cap")
+        print(
+            f"Backfill chat {outcome.chat_id} topic {outcome.topic_id}: "
+            f"scanned {outcome.scanned}, indexed {outcome.indexed} "
+            f"(min_id {outcome.start_min_id} -> {outcome.last_message_id}); "
+            f"stopped: {outcome.stop_reason}."
+        )
+    if len(outcomes) > 1:
+        print(f"Swept {len(outcomes)} topic(s); indexed {total_indexed} total.")
+    if incomplete:
+        print(
+            "  More history may remain — re-run the same command to continue from "
+            "the checkpoint (each run is incremental via min_id)."
+        )
 
 
 def _with_repositories(settings: Settings, work: Callable[[SqliteRepositories], None]) -> None:
@@ -511,6 +579,10 @@ def main() -> None:
 
     import argparse
 
+    # Lazily import for the backfill argparse defaults. Safe without the burner
+    # extra installed — telethon is imported inside the functions, not here.
+    from miki_sorter_bot import burner_backfill as _bf
+
     parser = argparse.ArgumentParser(
         prog="miki-burner",
         description="On-demand burner operations (designed for cron/systemd).",
@@ -520,12 +592,38 @@ def main() -> None:
     backfill_parser = subparsers.add_parser(
         "backfill", help="index an archive topic's history, then exit"
     )
-    backfill_parser.add_argument("topic_id", type=int, help="archive forum topic (thread) id")
+    backfill_parser.add_argument(
+        "topic_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="archive forum topic (thread) id; OMIT to automatically sweep every "
+        "active archive topic",
+    )
     backfill_parser.add_argument(
         "--chat", type=int, default=None, help="chat id (defaults to ARCHIVE_CHAT_ID)"
     )
     backfill_parser.add_argument(
-        "--limit", type=int, default=None, help="stop after indexing this many posts"
+        "--limit",
+        type=int,
+        default=_bf.DEFAULT_LIMIT,
+        help=f"stop after indexing this many posts (default {_bf.DEFAULT_LIMIT}; "
+        "0 disables the count cap — relies on --max-minutes)",
+    )
+    backfill_parser.add_argument(
+        "--max-minutes",
+        type=float,
+        default=_bf.DEFAULT_MAX_MINUTES,
+        dest="max_minutes",
+        help=f"stop after this many minutes, whichever comes first (default "
+        f"{_bf.DEFAULT_MAX_MINUTES}; 0 disables the time cap — relies on --limit)",
+    )
+    backfill_parser.add_argument(
+        "--jitter",
+        type=float,
+        default=_bf.DEFAULT_JITTER_SECONDS,
+        help=f"random extra seconds added to each inter-batch pause, for a less "
+        f"robotic request cadence (default {_bf.DEFAULT_JITTER_SECONDS})",
     )
     bridge_add_parser = subparsers.add_parser(
         "bridge-add", help="register a forward-bridge (foreign group -> Miki source topic)"
@@ -550,7 +648,16 @@ def main() -> None:
     if args.command == "backup":
         _cli_backup(settings)
     elif args.command == "backfill":
-        _cli_backfill(settings, topic_id=args.topic_id, chat_id=args.chat, limit=args.limit)
+        _cli_backfill(
+            settings,
+            topic_id=args.topic_id,
+            chat_id=args.chat,
+            # 0 is the documented escape hatch: disable that one cap (None), so
+            # the other cap still bounds the run.
+            limit=args.limit if args.limit else None,
+            max_minutes=args.max_minutes if args.max_minutes else None,
+            jitter=args.jitter,
+        )
     elif args.command == "bridge-add":
         _cli_bridge_add(
             settings,

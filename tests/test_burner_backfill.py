@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from miki_sorter_bot.burner_backfill import adapt_message, backfill_topic
+from miki_sorter_bot.burner_backfill import (
+    adapt_message,
+    backfill_all_topics,
+    backfill_topic,
+)
 from miki_sorter_bot.config import Settings
 from miki_sorter_bot.indexing import media_type
 from miki_sorter_bot.repositories import SqliteRepositories
@@ -187,3 +191,212 @@ def test_backfill_resumes_after_flood_wait(database_connection) -> None:
 def test_max_indexed_message_id_empty(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     assert repositories.max_indexed_message_id(-200, 7) == 0
+
+
+def test_backfill_stops_on_time_budget(database_connection) -> None:
+    # A fake monotonic clock that advances 1s per read. With max_seconds=2 the
+    # crawl must stop after the time check trips, well before history exhausts.
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    messages = [_msg(i, media="photo") for i in range(1, 21)]
+    ticks = iter(range(0, 1000))
+
+    outcome = backfill_topic(
+        repositories,
+        settings,
+        chat_id=-200,
+        topic_id=7,
+        history_factory=_history(messages),
+        max_seconds=2,
+        clock=lambda: next(ticks),
+    )
+
+    assert outcome.stop_reason == "time"
+    assert outcome.indexed < len(messages)
+
+
+def test_backfill_limit_reports_stop_reason(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    messages = [_msg(i, media="photo") for i in range(1, 11)]
+
+    outcome = backfill_topic(
+        repositories,
+        settings,
+        chat_id=-200,
+        topic_id=7,
+        history_factory=_history(messages),
+        limit=4,
+    )
+
+    assert outcome.indexed == 4
+    assert outcome.stop_reason == "limit"
+
+
+def test_backfill_exhausted_reports_stop_reason(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    messages = [_msg(i, media="photo") for i in (1, 2, 3)]
+
+    outcome = backfill_topic(
+        repositories, settings, chat_id=-200, topic_id=7, history_factory=_history(messages)
+    )
+
+    assert outcome.stop_reason == "exhausted"
+
+
+def test_backfill_applies_jittered_batch_delay(database_connection) -> None:
+    # batch_size=2 → a delay after every 2 scanned; delay = batch_delay + jitter*rand.
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    messages = [_msg(i, media="photo") for i in range(1, 5)]
+    slept: list[float] = []
+
+    backfill_topic(
+        repositories,
+        settings,
+        chat_id=-200,
+        topic_id=7,
+        history_factory=_history(messages),
+        batch_size=2,
+        batch_delay=1.0,
+        jitter=0.5,
+        rand=lambda: 1.0,  # deterministic: full jitter each time
+        sleep=slept.append,
+    )
+
+    assert slept == [1.5, 1.5]  # 1.0 base + 0.5 jitter, after msgs 2 and 4
+
+
+def test_backfill_flood_cap_stops_without_long_sleep(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    messages = [_msg(i, media="photo") for i in (1, 2, 3)]
+    slept: list[float] = []
+
+    def factory(min_id: int):
+        def gen():
+            for m in messages:
+                if m.id <= min_id:
+                    continue
+                if m.id == 2:
+                    raise FakeFlood(seconds=3600)  # 1h wait, over the cap
+                yield m
+
+        return gen()
+
+    outcome = backfill_topic(
+        repositories,
+        settings,
+        chat_id=-200,
+        topic_id=7,
+        history_factory=factory,
+        sleep=slept.append,
+        flood_wait_types=(FakeFlood,),
+        max_flood_wait_seconds=300.0,
+    )
+
+    assert outcome.stop_reason == "flood_cap"
+    assert slept == []  # never slept off the pathological wait
+    assert outcome.indexed == 1  # message 1 indexed before the flood
+
+
+def test_backfill_flood_under_cap_still_sleeps_and_resumes(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    messages = [_msg(i, media="photo") for i in (1, 2, 3)]
+    state = {"raised": False}
+    slept: list[float] = []
+
+    def factory(min_id: int):
+        def gen():
+            for m in messages:
+                if m.id <= min_id:
+                    continue
+                if m.id == 2 and not state["raised"]:
+                    state["raised"] = True
+                    raise FakeFlood(seconds=10)
+                yield m
+
+        return gen()
+
+    outcome = backfill_topic(
+        repositories,
+        settings,
+        chat_id=-200,
+        topic_id=7,
+        history_factory=factory,
+        sleep=slept.append,
+        flood_wait_types=(FakeFlood,),
+        max_flood_wait_seconds=300.0,
+    )
+
+    assert outcome.indexed == 3
+    assert outcome.stop_reason == "exhausted"
+    assert slept == [11.0]  # seconds + 1, under the cap
+
+
+def test_backfill_all_topics_sweeps_every_active_topic(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    repositories.register_topic(-200, 10, "A")
+    repositories.register_topic(-200, 20, "B")
+    histories = {
+        10: [_msg(1, media="photo"), _msg(2, media="video")],
+        20: [_msg(3, media="photo")],
+    }
+
+    def factory_for(thread_id: int):
+        return _history(histories[thread_id])
+
+    outcomes = backfill_all_topics(
+        repositories, settings, chat_id=-200, factory_for=factory_for
+    )
+
+    assert [o.topic_id for o in outcomes] == [10, 20]  # ordered by topic name
+    assert sum(o.indexed for o in outcomes) == 3
+    assert all(o.stop_reason == "exhausted" for o in outcomes)
+    # Each row is stamped with the topic it was swept from.
+    assert repositories.get_post(-200, 2).source_thread_id == 10
+    assert repositories.get_post(-200, 3).source_thread_id == 20
+
+
+def test_backfill_all_topics_skips_when_no_active_topics(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    outcomes = backfill_all_topics(
+        repositories, settings, chat_id=-200, factory_for=lambda _tid: _history([])
+    )
+    assert outcomes == []
+
+
+def test_backfill_all_topics_halts_sweep_on_flood_cap(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    repositories.register_topic(-200, 10, "A")
+    repositories.register_topic(-200, 20, "B")
+
+    def factory_for(thread_id: int):
+        def factory(min_id: int):
+            def gen():
+                if thread_id == 10:
+                    raise FakeFlood(seconds=3600)  # over the cap on the first topic
+                yield _msg(3, media="photo")
+
+            return gen()
+
+        return factory
+
+    outcomes = backfill_all_topics(
+        repositories,
+        settings,
+        chat_id=-200,
+        factory_for=factory_for,
+        flood_wait_types=(FakeFlood,),
+        max_flood_wait_seconds=300.0,
+        sleep=lambda _s: None,
+    )
+
+    # Sweep stops after the hard flood on topic 10; topic 20 is never touched.
+    assert len(outcomes) == 1
+    assert outcomes[0].stop_reason == "flood_cap"
