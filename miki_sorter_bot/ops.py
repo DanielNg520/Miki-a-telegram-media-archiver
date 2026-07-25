@@ -138,7 +138,24 @@ def cmd_logrotate(args: argparse.Namespace) -> int:
     return 1 if any(action.startswith("ERROR") for action in actions) else 0
 
 
+def _require_macos() -> int | None:
+    """Service management here is launchd-based (macOS). On other platforms the
+    subprocess calls (`launchctl`) would fail cryptically, so return early with
+    guidance instead. Returns an exit code to propagate, or None to proceed."""
+    if sys.platform == "darwin":
+        return None
+    print(
+        "Service install/load/unload/restart is launchd-only (macOS). On this "
+        f"platform ({sys.platform}) run the bot directly (`miki-sorter`) or via "
+        "your OS scheduler. All other `miki-ops` commands work here."
+    )
+    return 2
+
+
 def cmd_install(_args: argparse.Namespace) -> int:
+    guard = _require_macos()
+    if guard is not None:
+        return guard
     program = _resolve_bin("miki-sorter")
     if program is None:
         print("miki: 'miki-sorter' not found on PATH or in ~/.local/bin")
@@ -153,6 +170,9 @@ def cmd_install(_args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
+    guard = _require_macos()
+    if guard is not None:
+        return guard
     cmd_unload(args)
     path = _plist_path(SERVICE_LABEL)
     if path.exists():
@@ -162,6 +182,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 
 def cmd_load(_args: argparse.Namespace) -> int:
+    guard = _require_macos()
+    if guard is not None:
+        return guard
     path = _plist_path(SERVICE_LABEL)
     if not path.exists():
         print(f"miki: plist missing ({path})")
@@ -180,6 +203,9 @@ def cmd_load(_args: argparse.Namespace) -> int:
 
 
 def cmd_unload(_args: argparse.Namespace) -> int:
+    guard = _require_macos()
+    if guard is not None:
+        return guard
     path = _plist_path(SERVICE_LABEL)
     if not path.exists():
         return 0
@@ -197,6 +223,9 @@ def cmd_unload(_args: argparse.Namespace) -> int:
 
 
 def cmd_restart(_args: argparse.Namespace) -> int:
+    guard = _require_macos()
+    if guard is not None:
+        return guard
     # Fixed executables and argument vectors; no shell interpolation.
     uid = subprocess.run(
         ["/usr/bin/id", "-u"],
@@ -213,6 +242,39 @@ def cmd_restart(_args: argparse.Namespace) -> int:
         return 0
     print(f"miki: restart failed - {result.stderr.strip()}")
     return 1
+
+
+def cmd_bot(args: argparse.Namespace) -> int:
+    from miki_sorter_bot.bot_console import list_commands, run_command
+
+    if args.list or not args.name:
+        commands = list_commands()
+        print("Telegram commands runnable via `miki-ops bot <command> [args…]`:")
+        print("  " + "  ".join(commands))
+        print(
+            "\nRuns the same handler the bot runs, as an admin. Examples:\n"
+            "  miki-ops bot status\n"
+            "  miki-ops bot keyword_list\n"
+            "  miki-ops bot keyword_add JAV 日本\n"
+            "  miki-ops bot config LOG_LEVEL"
+        )
+        return 0
+    runtime = _open_runtime()
+    try:
+        result = run_command(
+            runtime.settings,
+            runtime.repositories,
+            runtime.storage,
+            name=args.name,
+            args=args.args,
+            chat_id=args.chat,
+            thread_id=args.thread,
+            user_id=args.as_user,
+        )
+    finally:
+        runtime.close()
+    print(result.output)
+    return 0 if result.ok else 1
 
 
 def render(report: DiagnosticReport, status: dict[str, object]) -> str:
@@ -409,11 +471,32 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_BYTES / (1024 * 1024),
     )
     rotate.add_argument("--keep", type=_non_negative_int, default=DEFAULT_KEEP)
-    sub.add_parser("install", help="generate a launchd plist for miki-sorter")
-    sub.add_parser("uninstall", help="unload and remove the launchd plist")
-    sub.add_parser("load", help="launchctl load the managed plist")
-    sub.add_parser("unload", help="launchctl unload the managed plist")
-    sub.add_parser("restart", help="launchctl kickstart the managed service")
+    sub.add_parser("install", help="generate a launchd plist for miki-sorter (macOS)")
+    sub.add_parser("uninstall", help="unload and remove the launchd plist (macOS)")
+    sub.add_parser("load", help="launchctl load the managed plist (macOS)")
+    sub.add_parser("unload", help="launchctl unload the managed plist (macOS)")
+    sub.add_parser("restart", help="launchctl kickstart the managed service (macOS)")
+    bot = sub.add_parser(
+        "bot",
+        help="run any Telegram admin command locally (e.g. `bot status`, "
+        "`bot keyword_add JAV 日本`); `bot --list` to enumerate",
+    )
+    bot.add_argument("name", nargs="?", help="command name (omit or --list to list)")
+    bot.add_argument(
+        "args", nargs=argparse.REMAINDER, help="arguments passed to the command"
+    )
+    bot.add_argument("--list", action="store_true", help="list available commands")
+    bot.add_argument(
+        "--chat", type=int, default=None,
+        help="chat id context (default: SOURCE_CHAT_ID)",
+    )
+    bot.add_argument(
+        "--thread", type=int, default=None, help="forum topic (thread) id context"
+    )
+    bot.add_argument(
+        "--as", dest="as_user", type=int, default=None,
+        help="act as this user id (default: first ADMIN_USER_IDS)",
+    )
     return parser
 
 
@@ -433,6 +516,7 @@ def _non_negative_int(value: str) -> int:
 
 _DISPATCH = {
     "backup": cmd_backup,
+    "bot": cmd_bot,
     "doctor": cmd_doctor,
     "health": cmd_health,
     "install": cmd_install,
