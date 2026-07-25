@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from miki_sorter_bot.diagnostics import DiagnosticCheck, DiagnosticReport
-from miki_sorter_bot.ops import _build_parser, _plist_xml, render, rotate_logs
+from miki_sorter_bot.ops import _build_parser, render, rotate_logs
+from miki_sorter_bot.service import _plist_xml
 
 
 def test_ops_parser_exposes_terminal_commands() -> None:

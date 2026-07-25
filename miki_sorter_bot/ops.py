@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
-from html import escape
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -13,16 +11,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from miki_sorter_bot import service
 from miki_sorter_bot.config import Settings, get_settings
 from miki_sorter_bot.diagnostics import DiagnosticReport, run_diagnostics
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.repositories import SqliteRepositories
 from miki_sorter_bot.storage import Storage
 
-LAUNCH_AGENTS = Path("~/Library/LaunchAgents").expanduser()
-LOG_DIR = Path("~/.local/log").expanduser()
-SERVICE_NAME = "miki"
-SERVICE_LABEL = "com.duy.miki-sorter"
+LOG_DIR = service.LOG_DIR
 DEFAULT_MAX_BYTES = 1 * 1024 * 1024
 DEFAULT_KEEP = 7
 
@@ -138,110 +134,36 @@ def cmd_logrotate(args: argparse.Namespace) -> int:
     return 1 if any(action.startswith("ERROR") for action in actions) else 0
 
 
-def _require_macos() -> int | None:
-    """Service management here is launchd-based (macOS). On other platforms the
-    subprocess calls (`launchctl`) would fail cryptically, so return early with
-    guidance instead. Returns an exit code to propagate, or None to proceed."""
-    if sys.platform == "darwin":
-        return None
-    print(
-        "Service install/load/unload/restart is launchd-only (macOS). On this "
-        f"platform ({sys.platform}) run the bot directly (`miki-sorter`) or via "
-        "your OS scheduler. All other `miki-ops` commands work here."
-    )
-    return 2
+def _emit(result: "service.Result") -> int:
+    """Print a service Result's messages and return its exit code."""
+    for message in result.messages:
+        print(message)
+    return result.code
 
 
 def cmd_install(_args: argparse.Namespace) -> int:
-    guard = _require_macos()
-    if guard is not None:
-        return guard
-    program = _resolve_bin("miki-sorter")
-    if program is None:
-        print("miki: 'miki-sorter' not found on PATH or in ~/.local/bin")
-        return 1
-    LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    path = _plist_path(SERVICE_LABEL)
-    path.write_text(_plist_xml(SERVICE_LABEL, program, Path.cwd()), encoding="utf-8")
-    print(f"miki: wrote {path} -> {program}")
-    print("installed. Run: miki-ops load")
-    return 0
+    # Working directory is captured now (where .env lives), like the launchd plist.
+    return _emit(service.install(Path.cwd()))
 
 
-def cmd_uninstall(args: argparse.Namespace) -> int:
-    guard = _require_macos()
-    if guard is not None:
-        return guard
-    cmd_unload(args)
-    path = _plist_path(SERVICE_LABEL)
-    if path.exists():
-        path.unlink()
-        print(f"miki: removed {path}")
-    return 0
+def cmd_uninstall(_args: argparse.Namespace) -> int:
+    return _emit(service.uninstall())
 
 
 def cmd_load(_args: argparse.Namespace) -> int:
-    guard = _require_macos()
-    if guard is not None:
-        return guard
-    path = _plist_path(SERVICE_LABEL)
-    if not path.exists():
-        print(f"miki: plist missing ({path})")
-        return 1
-    # Fixed executable and argument vector; no shell interpolation.
-    result = subprocess.run(
-        ["/bin/launchctl", "load", str(path)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        print("miki: loaded")
-        return 0
-    print(f"miki: load failed - {result.stderr.strip()}")
-    return 1
+    return _emit(service.load())
 
 
 def cmd_unload(_args: argparse.Namespace) -> int:
-    guard = _require_macos()
-    if guard is not None:
-        return guard
-    path = _plist_path(SERVICE_LABEL)
-    if not path.exists():
-        return 0
-    # Fixed executable and argument vector; no shell interpolation.
-    result = subprocess.run(
-        ["/bin/launchctl", "unload", str(path)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        print("miki: unloaded")
-        return 0
-    print(f"miki: unload failed - {result.stderr.strip()}")
-    return 1
+    return _emit(service.unload())
 
 
 def cmd_restart(_args: argparse.Namespace) -> int:
-    guard = _require_macos()
-    if guard is not None:
-        return guard
-    # Fixed executables and argument vectors; no shell interpolation.
-    uid = subprocess.run(
-        ["/usr/bin/id", "-u"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    result = subprocess.run(
-        ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        print("miki: restarted")
-        return 0
-    print(f"miki: restart failed - {result.stderr.strip()}")
-    return 1
+    return _emit(service.restart())
+
+
+def cmd_service_status(_args: argparse.Namespace) -> int:
+    return _emit(service.status())
 
 
 def cmd_bot(args: argparse.Namespace) -> int:
@@ -393,64 +315,6 @@ def _operations(runtime: Runtime) -> OperationsService:
     )
 
 
-def _plist_path(label: str) -> Path:
-    return LAUNCH_AGENTS / f"{label}.plist"
-
-
-def _resolve_bin(command: str) -> str | None:
-    found = shutil.which(command)
-    if found:
-        return found
-    fallback = Path.home() / ".local" / "bin" / command
-    return str(fallback) if fallback.exists() else None
-
-
-def _plist_xml(label: str, program: str, workdir: Path) -> str:
-    escaped_label = escape(label)
-    escaped_program = escape(program)
-    escaped_workdir = escape(str(workdir))
-    tag = label.rsplit(".", 1)[-1]
-    stdout_path = escape(str(LOG_DIR / f"{tag}.out.log"))
-    stderr_path = escape(str(LOG_DIR / f"{tag}.err.log"))
-    bindir = str(Path(program).parent)
-    path_env = ":".join(
-        [bindir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    )
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
-"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{escaped_label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{escaped_program}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{escape(path_env)}</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>{stdout_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{stderr_path}</string>
-    <key>WorkingDirectory</key>
-    <string>{escaped_workdir}</string>
-    <key>ProcessType</key>
-    <string>Background</string>
-</dict>
-</plist>
-"""
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="miki-ops",
@@ -471,11 +335,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_BYTES / (1024 * 1024),
     )
     rotate.add_argument("--keep", type=_non_negative_int, default=DEFAULT_KEEP)
-    sub.add_parser("install", help="generate a launchd plist for miki-sorter (macOS)")
-    sub.add_parser("uninstall", help="unload and remove the launchd plist (macOS)")
-    sub.add_parser("load", help="launchctl load the managed plist (macOS)")
-    sub.add_parser("unload", help="launchctl unload the managed plist (macOS)")
-    sub.add_parser("restart", help="launchctl kickstart the managed service (macOS)")
+    sub.add_parser(
+        "install",
+        help="register miki-sorter for autostart (launchd on macOS, Startup "
+        "folder on Windows) using the current directory for .env",
+    )
+    sub.add_parser("uninstall", help="stop and remove the autostart registration")
+    sub.add_parser("load", help="start the managed service now")
+    sub.add_parser("unload", help="stop the managed service")
+    sub.add_parser("restart", help="restart the managed service")
+    sub.add_parser("service-status", help="is the managed bot process running?")
     bot = sub.add_parser(
         "bot",
         help="run any Telegram admin command locally (e.g. `bot status`, "
@@ -524,6 +393,7 @@ _DISPATCH = {
     "logrotate": cmd_logrotate,
     "maintenance": cmd_maintenance,
     "restart": cmd_restart,
+    "service-status": cmd_service_status,
     "status": cmd_status,
     "uninstall": cmd_uninstall,
     "unload": cmd_unload,
