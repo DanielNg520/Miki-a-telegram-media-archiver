@@ -201,3 +201,33 @@ def test_request_topic_ids_override_resolves_live() -> None:
     assert live.request_topic_ids() == frozenset({70, 80})
     live.registry.reset("request_topic_ids", live.store)
     assert live.request_topic_ids() == frozenset({50})
+
+
+def test_notice_topics_defaults_to_source_topic() -> None:
+    live = LiveSettings(_settings(source_thread_id=5), FakeStore())
+    assert live.notice_topics() == frozenset({5})
+
+
+def test_notice_topics_follow_live_source_topic_change() -> None:
+    # Regression: after /source_set changes the source topic, notices must
+    # track the new topic even though the .env source topic is unchanged.
+    store = FakeStore()
+    live = LiveSettings(_settings(source_thread_id=5), store)
+    assert live.notice_topics() == frozenset({5})
+    store.set_runtime_setting("source_thread_id", "42")
+    assert live.notice_topics() == frozenset({42})
+
+
+def test_notice_topics_explicit_roster_overrides_source_topic() -> None:
+    store = FakeStore()
+    live = LiveSettings(_settings(source_thread_id=5), store)
+    live.registry.set("periodic_notice_topics", "70, 80", live.settings, live.store, user_id=1)
+    # An explicit roster wins and is not affected by a later source change.
+    store.set_runtime_setting("source_thread_id", "42")
+    assert live.notice_topics() == frozenset({70, 80})
+
+
+def test_notice_topics_ignores_invalid_source_override() -> None:
+    store = FakeStore({"source_thread_id": "not-an-int"})
+    live = LiveSettings(_settings(source_thread_id=5), store)
+    assert live.notice_topics() == frozenset({5})

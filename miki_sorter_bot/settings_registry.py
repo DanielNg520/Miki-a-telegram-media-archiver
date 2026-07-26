@@ -395,5 +395,27 @@ class LiveSettings:
     def notice_interval_minutes(self) -> int:
         return int(self.get("periodic_notice_interval_minutes"))
 
+    def effective_source_thread_id(self) -> int:
+        """The source topic in force: a runtime override if set, else the env value.
+
+        Mirrors ``Sorting._effective_source_thread_id`` so callers here resolve
+        the same topic Miki actually listens to after a live ``/source_set``.
+        """
+        override = self._store.get_runtime_setting("source_thread_id")
+        if override is not None:
+            try:
+                return int(override)
+            except ValueError:
+                LOGGER.warning(
+                    "Ignoring invalid runtime source_thread_id override",
+                    extra={"value": override},
+                )
+        return int(getattr(self._settings, "source_thread_id", 0))
+
     def notice_topics(self) -> frozenset[int]:
+        # When no explicit roster is set, follow the *effective* source topic so
+        # a live /source_set keeps notices working. The registry default reads
+        # only the .env source topic and cannot see the runtime override.
+        if self._store.get_runtime_setting("periodic_notice_topics") is None:
+            return frozenset({self.effective_source_thread_id()}) - {0}
         return frozenset(self.get("periodic_notice_topics"))
