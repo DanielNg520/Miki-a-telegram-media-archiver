@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -36,7 +37,10 @@ class Storage:
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         destination = directory / f"miki-{timestamp}.sqlite3"
-        with sqlite3.connect(destination) as target:
+        # closing(): a sqlite3 connection's context manager commits but does NOT
+        # close — the leaked handle blocks unlink/replace of the file on Windows
+        # (POSIX tolerates deleting open files; Windows does not).
+        with closing(sqlite3.connect(destination)) as target:
             self._connection.backup(target)
         self.verify_database(destination)
         return destination
@@ -45,7 +49,9 @@ class Storage:
         """Read health state through an isolated connection safe for probe threads."""
 
         uri = self._database_path.resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+        # closing() so this probe connection is released promptly; watch/status
+        # call it on a loop, and a leaked handle per call would accumulate.
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
@@ -55,7 +61,7 @@ class Storage:
     def verify_database(path: Path) -> None:
         if not path.is_file():
             raise ValueError(f"database does not exist: {path}")
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if result != "ok":
                 raise RuntimeError(f"database integrity check failed: {result}")
@@ -68,9 +74,11 @@ class Storage:
         temporary = destination.with_suffix(destination.suffix + ".restore")
         temporary.unlink(missing_ok=True)
         try:
-            with sqlite3.connect(source) as source_connection:
-                with sqlite3.connect(temporary) as target_connection:
-                    source_connection.backup(target_connection)
+            with (
+                closing(sqlite3.connect(source)) as source_connection,
+                closing(sqlite3.connect(temporary)) as target_connection,
+            ):
+                source_connection.backup(target_connection)
             Storage.verify_database(temporary)
             temporary.replace(destination)
         finally:
