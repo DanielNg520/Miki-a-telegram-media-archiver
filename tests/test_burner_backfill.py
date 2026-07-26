@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from miki_sorter_bot import burner_backfill as _bf
 from miki_sorter_bot.burner_backfill import (
+    BackfillOutcome,
     adapt_message,
     backfill_all_topics,
     backfill_topic,
@@ -400,3 +402,34 @@ def test_backfill_all_topics_halts_sweep_on_flood_cap(database_connection) -> No
     # Sweep stops after the hard flood on topic 10; topic 20 is never touched.
     assert len(outcomes) == 1
     assert outcomes[0].stop_reason == "flood_cap"
+
+
+def test_backfill_and_report_formats_sweep(monkeypatch) -> None:
+    outcomes = [
+        BackfillOutcome(-200, 10, 3, 2, 12, 0, "exhausted"),
+        BackfillOutcome(-200, 20, 1, 1, 5, 0, "limit"),
+    ]
+    monkeypatch.setattr(_bf, "run_backfill_all", lambda *a, **k: outcomes)
+    code, lines = _bf.backfill_and_report(_settings(), None, topic_id=None)
+    assert code == 0
+    assert any("topic 10" in line for line in lines)
+    assert any("Swept 2 topic(s); indexed 3 total" in line for line in lines)
+    # A 'limit' stop marks the run incomplete -> the re-run hint appears.
+    assert any("More history may remain" in line for line in lines)
+
+
+def test_backfill_and_report_single_topic(monkeypatch) -> None:
+    monkeypatch.setattr(
+        _bf, "run_backfill",
+        lambda *a, **k: BackfillOutcome(-200, 10, 3, 3, 12, 0, "exhausted"),
+    )
+    code, lines = _bf.backfill_and_report(_settings(), None, topic_id=10)
+    assert code == 0
+    assert len(lines) == 1 and "topic 10" in lines[0]
+
+
+def test_backfill_and_report_no_topics(monkeypatch) -> None:
+    monkeypatch.setattr(_bf, "run_backfill_all", lambda *a, **k: [])
+    code, lines = _bf.backfill_and_report(_settings(), None, topic_id=None)
+    assert code == 0
+    assert lines == ["Backfill: no active archive topics to index."]

@@ -166,6 +166,45 @@ def cmd_service_status(_args: argparse.Namespace) -> int:
     return _emit(service.status())
 
 
+def cmd_backfill(args: argparse.Namespace) -> int:
+    from miki_sorter_bot.burner_backfill import backfill_and_report
+
+    runtime = _open_runtime()
+    try:
+        settings = runtime.settings
+        repositories = runtime.repositories
+        chat_id = args.chat if args.chat is not None else settings.archive_chat_id
+        # Show what the config resolved to: the archive chat and the topic ids to
+        # sweep come straight from settings + the topics table — no ids to pass.
+        if args.topic_id is None:
+            topics = repositories.list_topics(chat_id)
+            if topics:
+                listing = ", ".join(f"{t.name} ({t.thread_id})" for t in topics)
+                print(f"Sweeping {len(topics)} archive topic(s) of chat {chat_id}: {listing}")
+            else:
+                print(f"No active topics registered for archive chat {chat_id}.")
+                return 0
+        # 0 disables that cap (see the burner CLI); pass None to the runner.
+        try:
+            code, lines = backfill_and_report(
+                settings,
+                repositories,
+                topic_id=args.topic_id,
+                chat_id=args.chat,
+                limit=args.limit if args.limit else None,
+                max_minutes=args.max_minutes if args.max_minutes else None,
+                jitter=args.jitter,
+            )
+        except SystemExit as exc:  # e.g. burner not configured
+            print(str(exc))
+            return 2
+    finally:
+        runtime.close()
+    for line in lines:
+        print(line)
+    return code
+
+
 def cmd_bot(args: argparse.Namespace) -> int:
     from miki_sorter_bot.bot_console import list_commands, run_command
 
@@ -345,6 +384,32 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("unload", help="stop the managed service")
     sub.add_parser("restart", help="restart the managed service")
     sub.add_parser("service-status", help="is the managed bot process running?")
+    from miki_sorter_bot import burner_backfill as _bf
+
+    backfill = sub.add_parser(
+        "backfill",
+        help="index archive history via the burner; OMIT topic id to sweep every "
+        "active archive topic (chat + topics come from config)",
+    )
+    backfill.add_argument(
+        "topic_id", type=int, nargs="?", default=None,
+        help="archive topic (thread) id; omit to sweep all active archive topics",
+    )
+    backfill.add_argument(
+        "--chat", type=int, default=None, help="chat id (default: ARCHIVE_CHAT_ID)"
+    )
+    backfill.add_argument(
+        "--limit", type=int, default=_bf.DEFAULT_LIMIT,
+        help=f"per-topic count cap (default {_bf.DEFAULT_LIMIT}; 0 disables it)",
+    )
+    backfill.add_argument(
+        "--max-minutes", dest="max_minutes", type=float, default=_bf.DEFAULT_MAX_MINUTES,
+        help=f"time budget for the whole run (default {_bf.DEFAULT_MAX_MINUTES}; 0 disables it)",
+    )
+    backfill.add_argument(
+        "--jitter", type=float, default=_bf.DEFAULT_JITTER_SECONDS,
+        help=f"random extra seconds per inter-batch pause (default {_bf.DEFAULT_JITTER_SECONDS})",
+    )
     bot = sub.add_parser(
         "bot",
         help="run any Telegram admin command locally (e.g. `bot status`, "
@@ -384,6 +449,7 @@ def _non_negative_int(value: str) -> int:
 
 
 _DISPATCH = {
+    "backfill": cmd_backfill,
     "backup": cmd_backup,
     "bot": cmd_bot,
     "doctor": cmd_doctor,

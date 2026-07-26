@@ -386,6 +386,61 @@ def run_backfill(
         )
 
 
+def backfill_and_report(
+    settings: Settings,
+    repositories: SqliteRepositories,
+    *,
+    topic_id: int | None = None,
+    chat_id: int | None = None,
+    limit: int | None = None,
+    max_minutes: float | None = None,
+    jitter: float = DEFAULT_JITTER_SECONDS,
+) -> tuple[int, list[str]]:
+    """Run a single-topic or all-topics backfill and format a human report.
+
+    Shared by ``miki-burner backfill`` and ``miki-ops backfill`` so both print
+    the same thing. ``topic_id`` omitted -> sweep every active archive topic
+    (chat + topic ids come from settings/DB). Returns (exit_code, lines);
+    ``run_backfill*`` may raise SystemExit if the burner is unconfigured — the
+    caller decides how to surface that."""
+
+    if topic_id is None:
+        outcomes = run_backfill_all(
+            settings, repositories, chat_id=chat_id, limit=limit,
+            max_minutes=max_minutes, jitter=jitter,
+        )
+    else:
+        outcomes = [
+            run_backfill(
+                settings, repositories, topic_id=topic_id, chat_id=chat_id,
+                limit=limit, max_minutes=max_minutes, jitter=jitter,
+            )
+        ]
+
+    if not outcomes:
+        return 0, ["Backfill: no active archive topics to index."]
+    lines: list[str] = []
+    total_indexed = 0
+    incomplete = False
+    for outcome in outcomes:
+        total_indexed += outcome.indexed
+        incomplete = incomplete or outcome.stop_reason in ("limit", "time", "flood_cap")
+        lines.append(
+            f"Backfill chat {outcome.chat_id} topic {outcome.topic_id}: "
+            f"scanned {outcome.scanned}, indexed {outcome.indexed} "
+            f"(min_id {outcome.start_min_id} -> {outcome.last_message_id}); "
+            f"stopped: {outcome.stop_reason}."
+        )
+    if len(outcomes) > 1:
+        lines.append(f"Swept {len(outcomes)} topic(s); indexed {total_indexed} total.")
+    if incomplete:
+        lines.append(
+            "  More history may remain — re-run the same command to continue from "
+            "the checkpoint (each run is incremental via min_id)."
+        )
+    return 0, lines
+
+
 def run_backfill_all(
     settings: Settings,
     repositories: SqliteRepositories,

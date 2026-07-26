@@ -471,57 +471,23 @@ def _cli_backfill(
     max_minutes: float | None,
     jitter: float,
 ) -> None:
-    from miki_sorter_bot.burner_backfill import run_backfill, run_backfill_all
+    from miki_sorter_bot.burner_backfill import backfill_and_report
 
     storage = Storage(settings.database_path)
     try:
-        repositories = storage.open()
-        if topic_id is None:
-            # No topic given -> sweep every active archive topic automatically.
-            outcomes = run_backfill_all(
-                settings,
-                repositories,
-                chat_id=chat_id,
-                limit=limit,
-                max_minutes=max_minutes,
-                jitter=jitter,
-            )
-        else:
-            outcomes = [
-                run_backfill(
-                    settings,
-                    repositories,
-                    topic_id=topic_id,
-                    chat_id=chat_id,
-                    limit=limit,
-                    max_minutes=max_minutes,
-                    jitter=jitter,
-                )
-            ]
+        _code, lines = backfill_and_report(
+            settings,
+            storage.open(),
+            topic_id=topic_id,
+            chat_id=chat_id,
+            limit=limit,
+            max_minutes=max_minutes,
+            jitter=jitter,
+        )
     finally:
         storage.close()
-
-    if not outcomes:
-        print("Backfill: no active archive topics to index.")
-        return
-    total_indexed = 0
-    incomplete = False
-    for outcome in outcomes:
-        total_indexed += outcome.indexed
-        incomplete = incomplete or outcome.stop_reason in ("limit", "time", "flood_cap")
-        print(
-            f"Backfill chat {outcome.chat_id} topic {outcome.topic_id}: "
-            f"scanned {outcome.scanned}, indexed {outcome.indexed} "
-            f"(min_id {outcome.start_min_id} -> {outcome.last_message_id}); "
-            f"stopped: {outcome.stop_reason}."
-        )
-    if len(outcomes) > 1:
-        print(f"Swept {len(outcomes)} topic(s); indexed {total_indexed} total.")
-    if incomplete:
-        print(
-            "  More history may remain — re-run the same command to continue from "
-            "the checkpoint (each run is incremental via min_id)."
-        )
+    for line in lines:
+        print(line)
 
 
 def _with_repositories(settings: Settings, work: Callable[[SqliteRepositories], None]) -> None:
