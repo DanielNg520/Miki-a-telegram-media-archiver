@@ -474,13 +474,20 @@ def _cli_backfill(
     loop: bool = False,
     cli_args: "argparse.Namespace | None" = None,
 ) -> None:
-    from miki_sorter_bot.burner_backfill import backfill_and_report, run_backfill_loop_cli
+    from miki_sorter_bot.burner_backfill import (
+        DEFAULT_DEEP_SCAN_LIMIT,
+        backfill_and_report,
+        run_backfill_loop_cli,
+    )
 
     storage = Storage(settings.database_path)
     try:
         repositories = storage.open()
+        deep = bool(cli_args and cli_args.deep)
+        if deep and topic_id is not None:
+            print("--deep fills all archive topics; ignoring the single topic id.")
         if loop:
-            if topic_id is not None:
+            if topic_id is not None and not deep:
                 print("--loop sweeps all archive topics; ignoring the single topic id.")
             run_backfill_loop_cli(
                 settings,
@@ -491,6 +498,8 @@ def _cli_backfill(
                 sleep_max=cli_args.sleep_max,
                 jitter=jitter,
                 use_takeout=use_takeout,
+                deep=deep,
+                deep_scan_limit=cli_args.deep_scan_limit,
             )
             return
         _code, lines = backfill_and_report(
@@ -502,6 +511,11 @@ def _cli_backfill(
             max_minutes=max_minutes,
             jitter=jitter,
             use_takeout=use_takeout,
+            deep=deep,
+            deep_scan_limit=(
+                cli_args.deep_scan_limit if cli_args
+                else DEFAULT_DEEP_SCAN_LIMIT
+            ),
         )
     finally:
         storage.close()
@@ -643,6 +657,20 @@ def main() -> None:
         type=float,
         default=_bf.DEFAULT_SLEEP_MAX_SECONDS,
         help=f"--loop: max seconds between cycles (default {_bf.DEFAULT_SLEEP_MAX_SECONDS:.0f})",
+    )
+    backfill_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="fill the PRE-Miki gap: crawl history BELOW the earliest indexed "
+        "message (all topics). Pair with --loop for a slow one-time fill",
+    )
+    backfill_parser.add_argument(
+        "--deep-scan-limit",
+        dest="deep_scan_limit",
+        type=int,
+        default=_bf.DEFAULT_DEEP_SCAN_LIMIT,
+        help=f"--deep: max messages read per topic per pass (default "
+        f"{_bf.DEFAULT_DEEP_SCAN_LIMIT})",
     )
     bridge_add_parser = subparsers.add_parser(
         "bridge-add", help="register a forward-bridge (foreign group -> Miki source topic)"

@@ -413,6 +413,22 @@ MIGRATIONS = (
         );
         """,
     ),
+    Migration(
+        13,
+        "backfill_cursors",
+        """
+        CREATE TABLE backfill_cursors (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL,
+            floor_message_id INTEGER NOT NULL DEFAULT 0 CHECK (floor_message_id >= 0),
+            done INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),
+            scanned INTEGER NOT NULL DEFAULT 0 CHECK (scanned >= 0),
+            indexed INTEGER NOT NULL DEFAULT 0 CHECK (indexed >= 0),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, thread_id)
+        );
+        """,
+    ),
 )
 
 

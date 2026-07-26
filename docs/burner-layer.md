@@ -106,8 +106,26 @@ miki-ops backfill --loop           # leave-it-running: small cycles + sleeps unt
 
 **Loop mode** (`--loop`) mirrors the archiver's run→sleep→run cadence: each cycle indexes at most
 `--cycle-limit` posts per topic, then sleeps a random `--sleep-min..--sleep-max` seconds, repeating
-until every topic is caught up (then it stops on its own). One client/takeout session is held for
-the whole loop; Ctrl-C (or SIGTERM) stops cleanly and the `min_id` checkpoint resumes the next run.
+until every topic is finished (then it stops on its own). One client/takeout session is held for
+the whole loop; Ctrl-C (or SIGTERM) stops cleanly and the checkpoint resumes the next run.
+
+**Forward vs. deep.** By default backfill reads *forward* — messages **newer** than the highest
+already-indexed id (`min_id` checkpoint) — so once Miki is current it finds nothing. To fill the
+**pre-Miki gap** (history that existed before Miki started, sitting *below* the earliest indexed id)
+use `--deep`:
+
+```bash
+miki-ops backfill --deep --loop     # slow, leave-it-running fill of all pre-Miki history
+miki-ops backfill --deep            # one bounded deep pass
+```
+
+The deep crawl walks each topic **downward** from just below its earliest indexed message toward the
+start of history, indexing media as it goes. It resumes exactly from a persisted floor cursor
+(`backfill_cursors` table) so **no message is ever re-read**, and each pass is additionally bounded by
+`--deep-scan-limit` (messages read per topic per pass) — the key account-safety guard, since a
+media-sparse stretch would otherwise read unboundedly. It stops on its own when every topic reaches
+the bottom of its history. This is a **one-time** gap-fill; afterward the forward mode keeps Miki
+current.
 
 **Account safety** — the burner is a real user account, so ban risk is real; the crawl is built to
 be gentle:

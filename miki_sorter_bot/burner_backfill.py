@@ -81,6 +81,12 @@ DEFAULT_CYCLE_LIMIT = 100
 DEFAULT_SLEEP_MIN_SECONDS = 60.0
 DEFAULT_SLEEP_MAX_SECONDS = 180.0
 
+# Deep ("backward") backfill reads the pre-Miki history *below* the earliest
+# indexed message. A media-sparse stretch could otherwise read unboundedly, so a
+# per-pass scan cap bounds the request volume even when little media is found —
+# the key account-safety guard for a large one-time gap-fill.
+DEFAULT_DEEP_SCAN_LIMIT = 1000
+
 
 @dataclass(frozen=True, slots=True)
 class BackfillOutcome:
@@ -254,7 +260,7 @@ def backfill_topic(
 
 
 def telethon_history_factory(client: object, chat: object, topic_id: int) -> HistoryFactory:
-    """Build a re-callable history factory over a connected Telethon client."""
+    """Forward history factory: messages NEWER than ``min_id``, oldest-first."""
 
     def factory(min_id: int) -> Iterable[object]:
         return client.iter_messages(  # type: ignore[attr-defined]
@@ -262,6 +268,22 @@ def telethon_history_factory(client: object, chat: object, topic_id: int) -> His
             reply_to=topic_id,
             reverse=True,
             min_id=min_id or 0,
+        )
+
+    return factory
+
+
+def telethon_history_below_factory(
+    client: object, chat: object, topic_id: int
+) -> "Callable[[int], Iterable[object]]":
+    """Backward history factory for the deep crawl: messages OLDER than
+    ``max_id`` (exclusive), newest-first. ``max_id`` 0 means from the latest."""
+
+    def factory(max_id: int) -> Iterable[object]:
+        return client.iter_messages(  # type: ignore[attr-defined]
+            chat,
+            reply_to=topic_id,
+            max_id=max_id or 0,
         )
 
     return factory
@@ -328,6 +350,187 @@ def backfill_all_topics(
         outcomes.append(outcome)
         if outcome.stop_reason == "flood_cap":
             break  # global backoff: don't hammer the next topic after a hard flood
+    return outcomes
+
+
+BelowFactory = Callable[[int], Iterable[object]]
+BelowFactoryFor = Callable[[int], BelowFactory]
+
+
+def deep_backfill_topic(
+    repositories: SqliteRepositories,
+    settings: Settings,
+    *,
+    chat_id: int,
+    topic_id: int,
+    history_below_factory: BelowFactory,
+    bot_id: int = 0,
+    index_limit: int | None = None,
+    scan_limit: int | None = None,
+    max_seconds: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    flood_wait_types: tuple[type[BaseException], ...] | None = None,
+    max_flood_wait_seconds: float | None = None,
+    batch_size: int = 200,
+    batch_delay: float = 0.0,
+    jitter: float = 0.0,
+    rand: Callable[[], float] = random.random,
+    should_stop: Callable[[], bool] | None = None,
+) -> BackfillOutcome:
+    """Crawl a topic's history DOWNWARD, indexing the pre-Miki gap below the
+    earliest indexed message. Resumes exactly from a persisted floor cursor
+    (``backfill_cursors``) — no message is ever re-read — and each pass is bounded
+    by ``index_limit`` (media indexed), ``scan_limit`` (messages read), and
+    ``max_seconds``, first hit wins. ``stop_reason='exhausted'`` means the bottom
+    of the topic was reached (nothing older remains)."""
+
+    indexer = MessageIndexer(repositories, bot_id)
+    cursor = repositories.get_backfill_cursor(chat_id, topic_id)
+    if cursor is not None and cursor.done:
+        return BackfillOutcome(
+            chat_id, topic_id, 0, 0, cursor.floor_message_id, cursor.floor_message_id,
+            "exhausted",
+        )
+    if cursor is not None:
+        start_floor = cursor.floor_message_id
+        prev_scanned, prev_indexed = cursor.scanned, cursor.indexed
+    else:
+        # Seed just below Miki's earliest post (0 = topic has none yet → from latest).
+        start_floor = repositories.min_indexed_message_id(chat_id, topic_id)
+        prev_scanned = prev_indexed = 0
+
+    flood_types = flood_wait_types if flood_wait_types is not None else _default_flood_wait_types()
+    scanned = 0
+    indexed = 0
+    current_max = start_floor  # read ids < current_max; descends as we go
+    started_at = clock()
+
+    def _over_time() -> bool:
+        return max_seconds is not None and (clock() - started_at) >= max_seconds
+
+    def _result(reason: str, done: bool) -> BackfillOutcome:
+        repositories.save_backfill_cursor(
+            chat_id,
+            topic_id,
+            floor_message_id=current_max,
+            done=done,
+            scanned=prev_scanned + scanned,
+            indexed=prev_indexed + indexed,
+        )
+        return BackfillOutcome(
+            chat_id, topic_id, scanned, indexed, current_max, start_floor, reason
+        )
+
+    while True:
+        try:
+            iterator: Iterator[object] = iter(history_below_factory(current_max))
+            for message in iterator:
+                scanned += 1
+                message_id = int(getattr(message, "id"))
+                current_max = message_id  # newest-first → each id is lower
+                adapted = adapt_message(message)
+                if adapted is not None and indexer.index(
+                    adapted,
+                    chat_id,
+                    thread_id_override=topic_id,
+                    message_id_override=message_id,
+                    source_kind_override="backfill",
+                ):
+                    indexed += 1
+                if index_limit is not None and indexed >= index_limit:
+                    return _result("limit", False)
+                if scan_limit is not None and scanned >= scan_limit:
+                    return _result("scan_limit", False)
+                if _over_time():
+                    return _result("time", False)
+                if should_stop is not None and should_stop():
+                    return _result("stopped", False)
+                if batch_delay and scanned % batch_size == 0:
+                    sleep(batch_delay + (jitter * rand() if jitter else 0.0))
+            break  # iterator drained → reached the bottom of the topic
+        except flood_types as error:  # type: ignore[misc]
+            seconds = float(getattr(error, "seconds", 1))
+            if max_flood_wait_seconds is not None and seconds > max_flood_wait_seconds:
+                logger.warning(
+                    "Deep backfill flood-wait %.0fs exceeds cap %.0fs; stopping "
+                    "cleanly (resumable).",
+                    seconds,
+                    max_flood_wait_seconds,
+                )
+                return _result("flood_cap", False)
+            logger.warning("Deep backfill hit flood-wait; sleeping %.0fs.", seconds + 1)
+            sleep(seconds + 1)
+            if _over_time():
+                return _result("time", False)
+            # Loop re-opens the iterator from the (lowered) current_max.
+
+    logger.info(
+        "Deep backfill chat %s topic %s: scanned %d, indexed %d down to id %d — bottom reached.",
+        chat_id,
+        topic_id,
+        scanned,
+        indexed,
+        current_max,
+    )
+    return _result("exhausted", True)
+
+
+def deep_backfill_all_topics(
+    repositories: SqliteRepositories,
+    settings: Settings,
+    *,
+    chat_id: int,
+    below_factory_for: BelowFactoryFor,
+    index_limit: int | None = None,
+    scan_limit: int | None = None,
+    max_seconds: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    flood_wait_types: tuple[type[BaseException], ...] | None = None,
+    max_flood_wait_seconds: float | None = None,
+    batch_size: int = 200,
+    batch_delay: float = 0.0,
+    jitter: float = 0.0,
+    rand: Callable[[], float] = random.random,
+    should_stop: Callable[[], bool] | None = None,
+) -> list[BackfillOutcome]:
+    """Deep-backfill every active topic once, sharing a time budget (like the
+    forward sweep). Already-completed topics return immediately (``exhausted``)."""
+
+    topics = repositories.list_topics(chat_id)
+    deadline = clock() + max_seconds if max_seconds is not None else None
+    outcomes: list[BackfillOutcome] = []
+    for topic in topics:
+        if should_stop is not None and should_stop():
+            break
+        remaining: float | None = None
+        if deadline is not None:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                break
+        outcome = deep_backfill_topic(
+            repositories,
+            settings,
+            chat_id=chat_id,
+            topic_id=topic.thread_id,
+            history_below_factory=below_factory_for(topic.thread_id),
+            index_limit=index_limit,
+            scan_limit=scan_limit,
+            max_seconds=remaining,
+            sleep=sleep,
+            clock=clock,
+            flood_wait_types=flood_wait_types,
+            max_flood_wait_seconds=max_flood_wait_seconds,
+            batch_size=batch_size,
+            batch_delay=batch_delay,
+            jitter=jitter,
+            rand=rand,
+            should_stop=should_stop,
+        )
+        outcomes.append(outcome)
+        if outcome.stop_reason == "flood_cap":
+            break
     return outcomes
 
 
@@ -443,16 +646,23 @@ def backfill_and_report(
     max_minutes: float | None = None,
     jitter: float = DEFAULT_JITTER_SECONDS,
     use_takeout: bool = True,
+    deep: bool = False,
+    deep_scan_limit: int = DEFAULT_DEEP_SCAN_LIMIT,
 ) -> tuple[int, list[str]]:
-    """Run a single-topic or all-topics backfill and format a human report.
+    """Run a one-shot backfill and format a human report. Shared by
+    ``miki-burner backfill`` and ``miki-ops backfill`` so both print the same
+    thing. ``deep=True`` runs the backward pre-Miki gap-fill over all topics;
+    otherwise ``topic_id`` omitted -> forward sweep of every active archive topic,
+    or a single topic. Returns (exit_code, lines); the runners may raise SystemExit
+    if the burner is unconfigured — the caller decides how to surface that."""
 
-    Shared by ``miki-burner backfill`` and ``miki-ops backfill`` so both print
-    the same thing. ``topic_id`` omitted -> sweep every active archive topic
-    (chat + topic ids come from settings/DB). Returns (exit_code, lines);
-    ``run_backfill*`` may raise SystemExit if the burner is unconfigured — the
-    caller decides how to surface that."""
-
-    if topic_id is None:
+    if deep:
+        outcomes = run_deep_backfill_all(
+            settings, repositories, chat_id=chat_id, index_limit=limit,
+            scan_limit=deep_scan_limit, max_minutes=max_minutes, jitter=jitter,
+            use_takeout=use_takeout,
+        )
+    elif topic_id is None:
         outcomes = run_backfill_all(
             settings, repositories, chat_id=chat_id, limit=limit,
             max_minutes=max_minutes, jitter=jitter, use_takeout=use_takeout,
@@ -524,6 +734,42 @@ def run_backfill_all(
         )
 
 
+def run_deep_backfill_all(
+    settings: Settings,
+    repositories: SqliteRepositories,
+    *,
+    chat_id: int | None = None,
+    index_limit: int | None = DEFAULT_LIMIT,
+    scan_limit: int | None = DEFAULT_DEEP_SCAN_LIMIT,
+    max_minutes: float | None = None,
+    jitter: float = DEFAULT_JITTER_SECONDS,
+    batch_delay: float = DEFAULT_BATCH_DELAY_SECONDS,
+    max_flood_wait_seconds: float | None = DEFAULT_MAX_FLOOD_WAIT_SECONDS,
+    use_takeout: bool = True,
+) -> list[BackfillOutcome]:
+    """One bounded deep (backward) pass over every active archive topic, sharing
+    one client. ``max_minutes`` bounds the whole pass."""
+
+    target_chat = chat_id if chat_id is not None else settings.archive_chat_id
+    max_seconds = max_minutes * 60.0 if max_minutes is not None else None
+    with _connected_client(settings, use_takeout=use_takeout) as client:
+        def below_for(thread_id: int) -> BelowFactory:
+            return telethon_history_below_factory(client, target_chat, thread_id)
+
+        return deep_backfill_all_topics(
+            repositories,
+            settings,
+            chat_id=target_chat,
+            below_factory_for=below_for,
+            index_limit=index_limit,
+            scan_limit=scan_limit,
+            max_seconds=max_seconds,
+            batch_delay=batch_delay,
+            jitter=jitter,
+            max_flood_wait_seconds=max_flood_wait_seconds,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class BackfillLoopOutcome:
     cycles: int
@@ -543,10 +789,9 @@ def _drive_backfill_loop(
 ) -> BackfillLoopOutcome:
     """Pure loop control (no Telegram): run a cycle, decide done/continue, sleep.
 
-    Caught-up test: a cycle that indexes nothing AND leaves every topic
-    ``exhausted`` (reached the end of its history) — there is no more history to
-    read, so the loop stops. Anything short of that (a topic cut off by the
-    per-cycle limit) means more remains, so it sleeps and goes again."""
+    Done test: a cycle where every topic reports ``exhausted`` (reached the end of
+    its history) — nothing remains, so the loop stops. Anything short of that (a
+    topic cut off by a limit) means more remains, so it sleeps and goes again."""
 
     cycle = 0
     total = 0
@@ -559,9 +804,12 @@ def _drive_backfill_loop(
         if not outcomes:
             on_event("no active archive topics — nothing to backfill.")
             return BackfillLoopOutcome(cycle, total, True)
-        if indexed == 0 and all(o.stop_reason == "exhausted" for o in outcomes):
+        # Done when every topic reached its end (forward: caught up to the head;
+        # deep: bottomed out). A topic cut short by a limit reports otherwise, so
+        # the loop keeps going.
+        if all(o.stop_reason == "exhausted" for o in outcomes):
             on_event(
-                f"backfill complete — all topics caught up "
+                f"backfill complete — all topics finished "
                 f"(indexed {total} over {cycle} cycle(s))."
             )
             return BackfillLoopOutcome(cycle, total, True)
@@ -586,16 +834,19 @@ def run_backfill_loop(
     batch_delay: float = DEFAULT_BATCH_DELAY_SECONDS,
     max_flood_wait_seconds: float | None = DEFAULT_MAX_FLOOD_WAIT_SECONDS,
     use_takeout: bool = True,
+    deep: bool = False,
+    deep_scan_limit: int = DEFAULT_DEEP_SCAN_LIMIT,
     on_event: Callable[[str], None] = lambda _message: None,
     stop_event: object | None = None,
 ) -> BackfillLoopOutcome:
-    """Continuously backfill in small cycles until caught up — the leave-it-running
+    """Continuously backfill in small cycles until finished — the leave-it-running
     model. One client/takeout session is held for the whole loop (re-opening one
     every cycle would be wasteful and re-initiate takeout needlessly). ``cycle_limit``
     bounds the posts indexed per topic per cycle; between cycles it sleeps a random
-    ``sleep_min..sleep_max`` seconds. A ``stop_event`` (threading.Event) stops it
-    cleanly between topics/cycles; the ``min_id`` checkpoint makes the next run
-    resume seamlessly."""
+    ``sleep_min..sleep_max`` seconds. ``deep=True`` runs the backward pre-Miki
+    gap-fill instead of the forward catch-up (bounded additionally by
+    ``deep_scan_limit`` reads/topic/cycle). A ``stop_event`` (threading.Event)
+    stops it cleanly between topics/cycles; the checkpoint resumes the next run."""
 
     target_chat = chat_id if chat_id is not None else settings.archive_chat_id
     should_stop = stop_event.is_set if stop_event is not None else (lambda: False)
@@ -603,6 +854,24 @@ def run_backfill_loop(
     wait = stop_event.wait if stop_event is not None else time.sleep
     with _connected_client(settings, use_takeout=use_takeout) as client:
         def run_cycle() -> list[BackfillOutcome]:
+            if deep:
+                def below_for(thread_id: int) -> BelowFactory:
+                    return telethon_history_below_factory(client, target_chat, thread_id)
+
+                return deep_backfill_all_topics(
+                    repositories,
+                    settings,
+                    chat_id=target_chat,
+                    below_factory_for=below_for,
+                    index_limit=cycle_limit,
+                    scan_limit=deep_scan_limit,
+                    max_seconds=None,
+                    batch_delay=batch_delay,
+                    jitter=jitter,
+                    max_flood_wait_seconds=max_flood_wait_seconds,
+                    should_stop=should_stop,
+                )
+
             def factory_for(thread_id: int) -> HistoryFactory:
                 return telethon_history_factory(client, target_chat, thread_id)
 
@@ -639,6 +908,8 @@ def run_backfill_loop_cli(
     sleep_max: float = DEFAULT_SLEEP_MAX_SECONDS,
     jitter: float = DEFAULT_JITTER_SECONDS,
     use_takeout: bool = True,
+    deep: bool = False,
+    deep_scan_limit: int = DEFAULT_DEEP_SCAN_LIMIT,
 ) -> int:
     """Run the continuous loop from a terminal: install SIGINT/SIGTERM handlers
     for a clean stop, print progress, and return an exit code. Shared by
@@ -658,10 +929,12 @@ def run_backfill_loop_cli(
         except (ValueError, OSError):  # not the main thread / unsupported signal
             pass
 
+    mode = "deep (pre-Miki gap)" if deep else "forward catch-up"
     print(
-        f"Backfill loop — up to {cycle_limit} post(s)/topic per cycle, sleeping "
-        f"{sleep_min:.0f}-{sleep_max:.0f}s between cycles. Runs until caught up; "
-        "Ctrl-C to stop (resumes from the checkpoint next time)."
+        f"Backfill loop [{mode}] — up to {cycle_limit} post(s)/topic per cycle"
+        + (f", ≤{deep_scan_limit} reads/topic" if deep else "")
+        + f", sleeping {sleep_min:.0f}-{sleep_max:.0f}s between cycles. Runs until "
+        "finished; Ctrl-C to stop (resumes from the checkpoint next time)."
     )
     try:
         outcome = run_backfill_loop(
@@ -673,6 +946,8 @@ def run_backfill_loop_cli(
             sleep_max=sleep_max,
             jitter=jitter,
             use_takeout=use_takeout,
+            deep=deep,
+            deep_scan_limit=deep_scan_limit,
             on_event=print,
             stop_event=stop,
         )

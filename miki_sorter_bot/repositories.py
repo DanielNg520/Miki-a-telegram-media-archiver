@@ -89,6 +89,18 @@ class ForwardingPairRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BackfillCursorRecord:
+    """Downward ("deep") backfill progress for a (chat, topic). ``floor`` is the
+    lowest message id scanned so far — the next deep pass reads ids below it.
+    ``done`` marks the topic fully crawled to the bottom of its history."""
+
+    floor_message_id: int
+    done: bool
+    scanned: int
+    indexed: int
+
+
+@dataclass(frozen=True, slots=True)
 class SearchToken:
     kind: str
     value: str
@@ -1753,6 +1765,69 @@ class SqliteRepositories:
             (source_chat_id, source_thread_id),
         ).fetchone()
         return int(row["max_id"]) if row and row["max_id"] is not None else 0
+
+    def min_indexed_message_id(self, source_chat_id: int, source_thread_id: int) -> int:
+        """Lowest already-indexed message id for a (chat, topic); 0 if none.
+
+        Seeds the deep-backfill floor: the downward crawl starts just below the
+        earliest post Miki already has, reading the pre-Miki history beneath it.
+        """
+
+        row = self._connection.execute(
+            """
+            SELECT MIN(source_message_id) AS min_id
+            FROM posts
+            WHERE source_chat_id = ? AND source_thread_id = ?
+            """,
+            (source_chat_id, source_thread_id),
+        ).fetchone()
+        return int(row["min_id"]) if row and row["min_id"] is not None else 0
+
+    def get_backfill_cursor(
+        self, chat_id: int, thread_id: int
+    ) -> BackfillCursorRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT floor_message_id, done, scanned, indexed
+            FROM backfill_cursors
+            WHERE chat_id = ? AND thread_id = ?
+            """,
+            (chat_id, thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return BackfillCursorRecord(
+            floor_message_id=int(row["floor_message_id"]),
+            done=bool(row["done"]),
+            scanned=int(row["scanned"]),
+            indexed=int(row["indexed"]),
+        )
+
+    def save_backfill_cursor(
+        self,
+        chat_id: int,
+        thread_id: int,
+        *,
+        floor_message_id: int,
+        done: bool,
+        scanned: int,
+        indexed: int,
+    ) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO backfill_cursors
+                (chat_id, thread_id, floor_message_id, done, scanned, indexed, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT (chat_id, thread_id) DO UPDATE SET
+                floor_message_id = excluded.floor_message_id,
+                done = excluded.done,
+                scanned = excluded.scanned,
+                indexed = excluded.indexed,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (chat_id, thread_id, floor_message_id, int(done), scanned, indexed),
+        )
+        self._connection.commit()
 
     def operational_status(self) -> dict[str, Any]:
         job_counts = {

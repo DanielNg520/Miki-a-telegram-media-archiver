@@ -9,7 +9,9 @@ from miki_sorter_bot.burner_backfill import (
     adapt_message,
     backfill_all_topics,
     backfill_topic,
+    deep_backfill_topic,
 )
+from miki_sorter_bot.indexing import MessageIndexer
 from miki_sorter_bot.config import Settings
 from miki_sorter_bot.indexing import media_type
 from miki_sorter_bot.repositories import SqliteRepositories
@@ -516,3 +518,83 @@ def test_loop_no_topics_is_done_immediately() -> None:
     )
     assert outcome.done is True
     assert outcome.cycles == 1
+
+
+def _below_history(messages):
+    """Fake backward factory: messages with id < max_id, newest-first (max_id 0 = all)."""
+
+    def factory(max_id: int):
+        below = [m for m in messages if max_id == 0 or m.id < max_id]
+        return sorted(below, key=lambda m: m.id, reverse=True)
+
+    return factory
+
+
+def _seed_post(repositories, message_id: int) -> None:
+    MessageIndexer(repositories, 0).index(
+        adapt_message(_msg(message_id, media="photo")),
+        -200,
+        thread_id_override=7,
+        message_id_override=message_id,
+        source_kind_override="backfill",
+    )
+
+
+def test_deep_backfill_indexes_below_floor_and_completes(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    _seed_post(repositories, 100)  # min_indexed = 100 -> deep floor seed
+    below = _below_history(
+        [_msg(70, media="photo"), _msg(60, media="video"), _msg(50, media="photo")]
+    )
+
+    outcome = deep_backfill_topic(
+        repositories, settings, chat_id=-200, topic_id=7, history_below_factory=below
+    )
+
+    assert outcome.indexed == 3
+    assert outcome.stop_reason == "exhausted"
+    cursor = repositories.get_backfill_cursor(-200, 7)
+    assert cursor is not None and cursor.done is True
+    assert repositories.min_indexed_message_id(-200, 7) == 50  # reached the bottom
+
+
+def test_deep_backfill_resumes_from_cursor_without_reread(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    _seed_post(repositories, 100)
+    below = _below_history([_msg(i, media="photo") for i in range(90, 100)])  # 90..99
+
+    first = deep_backfill_topic(
+        repositories, settings, chat_id=-200, topic_id=7,
+        history_below_factory=below, scan_limit=3,
+    )
+    assert first.indexed == 3 and first.stop_reason == "scan_limit"
+    cursor = repositories.get_backfill_cursor(-200, 7)
+    assert cursor.floor_message_id == 97 and cursor.done is False  # 99,98,97 read
+
+    second = deep_backfill_topic(
+        repositories, settings, chat_id=-200, topic_id=7, history_below_factory=below
+    )
+    assert second.indexed == 7  # 96..90, none re-read
+    assert second.stop_reason == "exhausted"
+    assert repositories.get_backfill_cursor(-200, 7).done is True
+
+
+def test_deep_backfill_done_topic_is_noop(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    settings = _settings()
+    repositories.save_backfill_cursor(
+        -200, 7, floor_message_id=5, done=True, scanned=10, indexed=4
+    )
+    calls: list[int] = []
+
+    def below(max_id: int):
+        calls.append(max_id)
+        return []
+
+    outcome = deep_backfill_topic(
+        repositories, settings, chat_id=-200, topic_id=7, history_below_factory=below
+    )
+    assert outcome.stop_reason == "exhausted" and outcome.indexed == 0
+    assert calls == []  # a completed topic reads nothing

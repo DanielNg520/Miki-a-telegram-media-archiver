@@ -22,7 +22,7 @@ user-account layer see [burner-layer.md](burner-layer.md).
 |---|---|
 | `storage.py` | `Storage` — connection lifecycle (WAL, FK, busy-timeout), online backup/restore + verification. |
 | `repositories.py` | `SqliteRepositories` — the single SQL adapter behind repository protocols; all tables live here. |
-| `migrations.py` | Forward-only, immutable migrations (currently 12). |
+| `migrations.py` | Forward-only, immutable migrations (currently 13). |
 | `config.py` | Pydantic `Settings` — env parsing/validation, the source of truth for `.env` keys and derived properties. |
 | `settings_registry.py` | Runtime-tunable knobs (`/config` `/set` `/reset`) with read-through `LiveSettings`, self-healing on poisoned overrides. |
 
@@ -75,8 +75,9 @@ Core: `topics`, `route_mappings`, `route_managers`, `posts` (+ `post_tokens`), `
 `jobs`, `deliveries`, `retrieval_items`, `dead_letters`, `integration_nonces`/`integration_usage`,
 `audit_events`, `metric_counters`, `runtime_settings`, `forwarding_pairs`.
 
-Burner (migrations 9–12): `burner_status` (single-row heartbeat), `burner_commands` (jobs-style
-queue with `reported_at`), `burner_bridges` (foreign chat → source topic + checkpoint). Migration 11
+Burner (migrations 9–13): `burner_status` (single-row heartbeat), `burner_commands` (jobs-style
+queue with `reported_at`), `burner_bridges` (foreign chat → source topic + checkpoint),
+`backfill_cursors` (deep-backfill floor per chat/topic — lowest scanned id + done). Migration 11
 rebuilt `posts` to add the `backfill` `source_kind` (children snapshotted/restored to preserve FK
 integrity under the FK-on migration transaction).
 

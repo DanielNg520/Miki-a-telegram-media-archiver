@@ -176,17 +176,21 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         chat_id = args.chat if args.chat is not None else settings.archive_chat_id
         # Show what the config resolved to: the archive chat and the topic ids to
         # sweep come straight from settings + the topics table — no ids to pass.
-        if args.topic_id is None:
+        if args.topic_id is None or args.deep:
             topics = repositories.list_topics(chat_id)
             if topics:
                 listing = ", ".join(f"{t.name} ({t.thread_id})" for t in topics)
-                print(f"Sweeping {len(topics)} archive topic(s) of chat {chat_id}: {listing}")
+                scope = "deep-filling" if args.deep else "sweeping"
+                print(f"{scope.capitalize()} {len(topics)} archive topic(s) of chat "
+                      f"{chat_id}: {listing}")
             else:
                 print(f"No active topics registered for archive chat {chat_id}.")
                 return 0
-        # Continuous mode: small cycles + sleeps until caught up. Leave it running.
+        if args.deep and args.topic_id is not None:
+            print("--deep fills all archive topics; ignoring the single topic id.")
+        # Continuous mode: small cycles + sleeps until finished. Leave it running.
         if args.loop:
-            if args.topic_id is not None:
+            if args.topic_id is not None and not args.deep:
                 print("--loop sweeps all archive topics; ignoring the single topic id.")
             return run_backfill_loop_cli(
                 settings,
@@ -197,6 +201,8 @@ def cmd_backfill(args: argparse.Namespace) -> int:
                 sleep_max=args.sleep_max,
                 jitter=args.jitter,
                 use_takeout=args.use_takeout,
+                deep=args.deep,
+                deep_scan_limit=args.deep_scan_limit,
             )
         # 0 disables that cap (see the burner CLI); pass None to the runner.
         try:
@@ -209,6 +215,8 @@ def cmd_backfill(args: argparse.Namespace) -> int:
                 max_minutes=args.max_minutes if args.max_minutes else None,
                 jitter=args.jitter,
                 use_takeout=args.use_takeout,
+                deep=args.deep,
+                deep_scan_limit=args.deep_scan_limit,
             )
         except SystemExit as exc:  # e.g. burner not configured
             print(str(exc))
@@ -445,6 +453,17 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill.add_argument(
         "--sleep-max", dest="sleep_max", type=float, default=_bf.DEFAULT_SLEEP_MAX_SECONDS,
         help=f"--loop: max seconds between cycles (default {_bf.DEFAULT_SLEEP_MAX_SECONDS:.0f})",
+    )
+    backfill.add_argument(
+        "--deep", action="store_true",
+        help="fill the PRE-Miki gap: crawl history BELOW the earliest indexed "
+        "message (all topics). Pair with --loop for a slow 24/7 one-time fill",
+    )
+    backfill.add_argument(
+        "--deep-scan-limit", dest="deep_scan_limit", type=int,
+        default=_bf.DEFAULT_DEEP_SCAN_LIMIT,
+        help=f"--deep: max messages read per topic per pass (default "
+        f"{_bf.DEFAULT_DEEP_SCAN_LIMIT})",
     )
     bot = sub.add_parser(
         "bot",
