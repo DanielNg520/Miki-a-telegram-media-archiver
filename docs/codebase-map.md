@@ -16,7 +16,6 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | `indexing.py` | `MessageIndexer` (duck-typed message → indexed post + tokens), `IndexingService`, the deterministic token `extract_search_tokens`, and `/reindex`. |
 | `lookback.py` | Short-lived per-topic buffer of recent uncaptioned media, claimable by a later hashtag-only message. |
 | `retrieval.py` | `#request` parsing/validation and `RetrievalService` — search, batched album delivery, idempotent per-item records. |
-| `collector.py` | Legacy Data Collector client (keyword confirmation). |
 
 ### State & configuration
 | Module | Responsibility |

@@ -39,10 +39,6 @@ class Settings(BaseSettings):
         alias="TOPIC_FORWARDING_JSON",
     )
     request_chat_id: int | None = Field(default=None, alias="REQUEST_CHAT_ID")
-    collector_url: str = Field(default="http://127.0.0.1:8787", alias="COLLECTOR_URL")
-    collector_api_key: str = Field(default="", alias="COLLECTOR_API_KEY")
-    collector_database: str = Field(default="", alias="COLLECTOR_DATABASE")
-    collector_timeout: float = Field(default=5.0, gt=0, alias="COLLECTOR_TIMEOUT")
     database_path: Path = Field(default=Path("var/miki.sqlite3"), alias="DATABASE_PATH")
     backup_directory: Path = Field(default=Path("var/backups"), alias="BACKUP_DIRECTORY")
     transient_retention_days: int = Field(

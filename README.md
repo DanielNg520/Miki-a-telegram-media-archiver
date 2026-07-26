@@ -1,8 +1,9 @@
 # miki_a_friendly_sorter_bot
 
 Miki is a Telegram sorter bot for forum-style supergroups. It watches one source topic and
-processes only messages containing media. It checks keywords from the message text or caption
-against the Data Collector database, then copies confirmed matches into the configured topic.
+processes only messages containing media. It matches keywords, hashtags, and phrases from the
+message text or caption against registered route mappings, then copies matches into the
+configured destination topic.
 
 ## What Telegram Setup Is Required
 
@@ -53,9 +54,6 @@ Important IDs:
 - `REQUEST_CHAT_ID`: supergroup where retrieval requests are submitted and results are copied.
   Leave blank to use `ARCHIVE_CHAT_ID`. This is the `.env` default; it can be changed at runtime
   (no restart) with `/set request_chat_id <id>`, and `/reset request_chat_id` reverts to it.
-- `COLLECTOR_URL`: Data Collector API URL.
-- `COLLECTOR_API_KEY`: Miki's Data Collector API key.
-- `COLLECTOR_DATABASE`: database name to query, such as `gvdb`.
 - `DATABASE_PATH`: local SQLite database used for Miki's durable state and search index.
 - `ADMIN_USER_IDS`: comma-separated Telegram user IDs allowed to manage Miki.
 - `REQUEST_TOPIC_IDS`: comma-separated topic IDs within `REQUEST_CHAT_ID` where retrieval requests
@@ -76,8 +74,7 @@ Important IDs:
   `sentry-sdk` is installed.
 - `ROUTES_JSON`: routing rules.
 
-`COLLECTOR_*` and `ROUTES_JSON` are legacy-compatible settings. The active sorter uses registered
-database mappings.
+`ROUTES_JSON` is a legacy-compatible setting. The active sorter uses registered database mappings.
 
 Example direct forwarding (all topic IDs are within `SOURCE_CHAT_ID` and `ARCHIVE_CHAT_ID`):
 

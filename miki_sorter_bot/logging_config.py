@@ -17,7 +17,6 @@ REDACTED_KEYS = frozenset(
         "authorization",
         "bot_token",
         "caption",
-        "collector_api_key",
         "message_text",
         "password",
         "text",

@@ -13,8 +13,6 @@ def _values() -> dict[str, object]:
         "SOURCE_CHAT_ID": -100,
         "SOURCE_THREAD_ID": 5,
         "ARCHIVE_CHAT_ID": -200,
-        "COLLECTOR_API_KEY": "secret",
-        "COLLECTOR_DATABASE": "gvdb",
         "ROUTES_JSON": '[{"name":"Codes","thread_id":9,"keywords":["CR"]}]',
     }
 
@@ -51,10 +49,8 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(**values)
 
-    def test_legacy_collector_and_routes_are_optional(self) -> None:
+    def test_routes_are_optional(self) -> None:
         values = _values()
-        values.pop("COLLECTOR_API_KEY")
-        values.pop("COLLECTOR_DATABASE")
         values["ROUTES_JSON"] = "[]"
 
         settings = Settings(**values)
