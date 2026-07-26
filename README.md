@@ -210,7 +210,13 @@ miki-ops bot --as <user_id> <cmd>    # act as a specific admin; --chat/--thread 
 ```bash
 miki-ops backfill                    # sweep every active archive topic (chat + topics from config)
 miki-ops backfill <topic_id>         # a single topic
+miki-ops backfill --loop             # leave-it-running: small cycles + sleeps until caught up
+miki-ops backfill --deep --loop      # one-time fill of the pre-Miki history gap (walks history downward)
 ```
+
+`--loop` mirrors the archiver's run→sleep→run cadence and stops on its own once caught up. `--deep`
+fills history that predates Miki (below the earliest indexed id); it is a bounded, resumable,
+one-time gap-fill. Both are covered in full — with account-safety details — in `docs/burner-layer.md`.
 
 For all hosting (VPS/polling, DigitalOcean droplet, Render/Koyeb webhook), see
 `docs/deployment.md`.

@@ -50,7 +50,7 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | `burner.py` | `BurnerCapability` gate, heartbeat loop, command dispatch (`process_pending_commands`), and the `miki-burner` CLI (`backup`/`backfill`/`bridge-*`/`once`/`run`). |
 | `burner_session.py` | `miki-burner-login` — one-time interactive `StringSession` bootstrap + `validate_session`. |
 | `burner_backup.py` | Consistent backup → gzip → age-encrypt → upload; retention; restore runbook. |
-| `burner_backfill.py` | Telethon→duck-type adapter + the history crawl into `MessageIndexer`: single-topic or all-topics sweep, read via a takeout session, bounded by count/time, jittered, flood-wait-capped, `min_id`-checkpointed. Shared runner behind `miki-ops backfill` and `miki-burner backfill`. |
+| `burner_backfill.py` | Telethon→duck-type adapter + the history crawl into `MessageIndexer`: single-topic or all-topics sweep, read via a takeout session, bounded by count/time, jittered, flood-wait-capped. Forward mode is `min_id`-checkpointed; `--deep` walks each topic downward into pre-Miki history from a persisted floor cursor (`backfill_cursors`); `--loop` runs cycle→sleep→repeat until caught up. Shared runner behind `miki-ops backfill` and `miki-burner backfill`. |
 | `burner_bridge.py` | Cron-polled forward-bridge: seed-then-forward with checkpoint, `noforwards` detection, flood-wait. |
 | `burner_reporting.py` | `BurnerResultReporter` (runs in the bot) — reclaims stale running commands, reports finished ones back into chat. |
 
