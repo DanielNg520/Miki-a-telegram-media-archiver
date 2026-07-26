@@ -175,6 +175,43 @@ make verify
 That runs the test suite, bytecode import compilation, dependency consistency checks, and
 `miki-doctor`.
 
+### Local operation (`miki-ops`)
+
+`miki-ops` is the terminal console for running Miki on your own machine. It manages the service,
+mirrors every Telegram admin command, and drives history backfill.
+
+**Service management** — cross-platform and no-admin (launchd LaunchAgent on macOS, a hidden
+Startup-folder launcher on Windows). `install` captures the current directory so the service finds
+your `.env`:
+
+```bash
+miki-ops install          # register autostart-at-logon
+miki-ops load             # start now
+miki-ops restart          # restart
+miki-ops unload           # stop
+miki-ops service-status   # is the bot process running?
+miki-ops uninstall        # remove autostart
+```
+
+**Monitoring & maintenance:** `miki-ops health` (dashboard), `watch` (auto-refresh), `status`,
+`doctor`, `backup` (verified snapshot), `maintenance`, `logrotate`.
+
+**Run any Telegram admin command locally** — the exact same handler the bot runs, as an admin:
+
+```bash
+miki-ops bot --list                  # every runnable command
+miki-ops bot status
+miki-ops bot keyword_add JAV 日本
+miki-ops bot --as <user_id> <cmd>    # act as a specific admin; --chat/--thread set context
+```
+
+**History backfill** (requires the burner — see `docs/burner-layer.md`):
+
+```bash
+miki-ops backfill                    # sweep every active archive topic (chat + topics from config)
+miki-ops backfill <topic_id>         # a single topic
+```
+
 For all hosting (VPS/polling, DigitalOcean droplet, Render/Koyeb webhook), see
 `docs/deployment.md`.
 

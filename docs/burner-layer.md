@@ -13,7 +13,7 @@ For core internals see [architecture.md](architecture.md); for hosting see
 | Capability | Command | Purpose |
 |---|---|---|
 | **Backup offload** | `miki-burner backup` | Encrypted, compressed DB snapshot pushed into the archive group so the index survives loss of the droplet or the burner account. |
-| **History backfill** | `miki-burner backfill <topic_id>` | Reads an archive topic's history and feeds the existing indexer, making pre-bot posts searchable/retrievable. |
+| **History backfill** | `miki-ops backfill` / `miki-burner backfill` | Reads archive topic history (all active topics by default) and feeds the existing indexer, making pre-bot posts searchable/retrievable. See [History backfill](#history-backfill). |
 | **Forward-bridge** | `miki-burner bridge-once` | Forwards new media from a group Miki can't join into a Miki source topic, where the normal pipeline archives it. |
 
 Everything runs as **on-demand CLI**, invoked from cron/systemd — not an always-on process. That
@@ -81,14 +81,49 @@ The session string is a **full-account credential** — store it the way you sto
 ## Cron automation
 
 ```cron
-30 3 * * *  cd /opt/miki && miki-burner backup                # encrypted offload to the group
-0  4 * * *  cd /opt/miki && miki-burner backfill <topic_id>   # incremental index (min_id catch-up)
-*/5 * * * * cd /opt/miki && miki-burner bridge-once           # near-live forward-bridge
+30 3 * * *  cd /opt/miki && miki-burner backup       # encrypted offload to the group
+0  4 * * *  cd /opt/miki && miki-burner backfill      # incremental sweep of every archive topic
+*/5 * * * * cd /opt/miki && miki-burner bridge-once   # near-live forward-bridge
 ```
 
 Each command exits after bounded work. Backfill and bridge use a stored checkpoint so repeated
 runs do the minimum — backfill only reads messages newer than what's indexed; a bridge forwards
 only messages newer than its last-forwarded id.
+
+## History backfill
+
+Reads archive-topic history with the burner account and feeds each media message into the *existing*
+`MessageIndexer`, making pre-bot posts searchable/retrievable. Run it from either CLI — omit the
+topic id to sweep **every active archive topic**, resolving the chat (`ARCHIVE_CHAT_ID`) and topic
+ids from the `topics` table, so no ids need be passed:
+
+```bash
+miki-ops backfill                  # sweep all active archive topics
+miki-ops backfill <topic_id>       # one topic
+miki-burner backfill [<topic_id>]  # same, from the burner CLI
+```
+
+**Account safety** — the burner is a real user account, so ban risk is real; the crawl is built to
+be gentle:
+
+- **Read-only** — only `iter_messages`; it never sends or copies (delivery still happens via the bot).
+- **Takeout session by default** — reads run inside Telegram's sanctioned data-export ("takeout")
+  mode, the gentlest way to bulk-read history. Falls back to a throttled direct read if a takeout
+  can't be started; `--no-takeout` forces the direct path.
+- **Always bounded** — `--limit` (per-topic post cap, default 500) *and* `--max-minutes` (budget for
+  the whole run, default 15), first hit wins; `0` disables either cap. A sweep shares one time budget
+  across all topics, so a pass can never become an open-ended scan.
+- **Throttled + jittered** — a base inter-batch delay plus `--jitter` random seconds keeps the
+  request cadence from being robotically even.
+- **Flood-wait aware, capped** — a flood-wait is slept off and the crawl resumes from the cursor; a
+  wait longer than the cap stops the run cleanly (it is resumable) instead of sleeping for hours.
+- **Incremental** — resumes from a per-topic `min_id` checkpoint, so re-running continues where it
+  left off. A run that stops on limit/time/flood prints a "re-run to continue" hint.
+- **One shared client** is reused across all topics in a sweep (reconnecting per topic is itself
+  ban-prone).
+
+A dedicated or secondary account is safest since a ban lands on whichever account holds the session,
+but a bounded, takeout-based sweep of your own account is a reasonable choice.
 
 ## Telegram command plane (optional)
 

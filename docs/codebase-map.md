@@ -39,7 +39,10 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | `logging_config.py` | Structured/console logging + correlation IDs. |
 | `instance_lock.py` | One-process-per-token OS lock. |
 | `integrations.py` | `IntegrationService` — transport-neutral, signed, versioned request dispatcher (no open port). |
-| `ops.py` / `show_ids.py` | `miki-ops` console and the standalone `miki-show-ids` listener. |
+| `ops.py` | `miki-ops` console: health/watch/status/doctor/backup/maintenance/logrotate, `bot`/`backfill` subcommands, and service verbs delegated to `service.py`. |
+| `service.py` | Cross-platform service management — launchd LaunchAgent (macOS) or Startup-folder launcher + process control (Windows) behind one platform-dispatched API. |
+| `bot_console.py` | Runs any Telegram admin command locally by driving the same handlers with a synthetic admin `Update`/`Context` (`miki-ops bot`). |
+| `show_ids.py` | Standalone `miki-show-ids` setup listener. |
 
 ### Burner layer (optional, capability-gated; all Telethon/pyrage imports are lazy)
 | Module | Responsibility |
@@ -47,7 +50,7 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | `burner.py` | `BurnerCapability` gate, heartbeat loop, command dispatch (`process_pending_commands`), and the `miki-burner` CLI (`backup`/`backfill`/`bridge-*`/`once`/`run`). |
 | `burner_session.py` | `miki-burner-login` — one-time interactive `StringSession` bootstrap + `validate_session`. |
 | `burner_backup.py` | Consistent backup → gzip → age-encrypt → upload; retention; restore runbook. |
-| `burner_backfill.py` | Telethon→duck-type adapter + bounded, flood-wait-aware, `min_id`-checkpointed history crawl into `MessageIndexer`. |
+| `burner_backfill.py` | Telethon→duck-type adapter + the history crawl into `MessageIndexer`: single-topic or all-topics sweep, read via a takeout session, bounded by count/time, jittered, flood-wait-capped, `min_id`-checkpointed. Shared runner behind `miki-ops backfill` and `miki-burner backfill`. |
 | `burner_bridge.py` | Cron-polled forward-bridge: seed-then-forward with checkpoint, `noforwards` detection, flood-wait. |
 | `burner_reporting.py` | `BurnerResultReporter` (runs in the bot) — reclaims stale running commands, reports finished ones back into chat. |
 

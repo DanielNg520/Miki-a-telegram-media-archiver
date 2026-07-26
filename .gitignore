@@ -33,6 +33,9 @@ dist/
 .coverage
 htmlcov/
 
+# ---- Local-only working notes (content consolidated into docs/) ----
+BACKFILL_PLAN.md
+
 # ---- OS / editor cruft ----
 .DS_Store
 *.swp

@@ -176,9 +176,21 @@ webhook server already owns the platform `PORT`.
 Admin commands: `/health` (SQLite integrity, FK enforcement, Telegram connectivity), `/status`
 (library size, unavailable posts, queue states, dead letters, retries/throttles, average delivery
 time), `/maintenance` (prune expired transient records + old audit events, then index optimization),
-`/backup` (verified snapshot). Local equivalents: `miki-doctor`, and the `miki-ops` console
-(`health`, `watch`, `status`, `doctor`, `backup`, `maintenance`, `logrotate`, `install`, `load`,
-`restart`).
+`/backup` (verified snapshot). Local equivalents: `miki-doctor`, and the `miki-ops` console —
+monitoring (`health`, `watch`, `status`, `doctor`, `backup`, `maintenance`, `logrotate`), the
+`bot <command>` subconsole that runs any Telegram admin command locally, `backfill`, and
+cross-platform service management (`install`, `load`, `unload`, `restart`, `uninstall`,
+`service-status`).
+
+### Local service (macOS / Windows)
+
+For running Miki on a personal machine instead of a hosted target, `miki-ops install` registers
+autostart-at-logon with no admin rights — a launchd LaunchAgent on macOS, a hidden Startup-folder
+launcher (`.vbs` → `.bat`) on Windows — capturing the current directory so the service loads the
+right `.env`, and redirecting output to `~/.local/log`. `load`/`unload`/`restart`/`service-status`
+control and inspect the running process; the single-instance lock prevents a manual `load` from
+double-starting the bot. (Autostart runs at logon; automatic crash-restart would need Task Scheduler
+on Windows, which requires elevation.)
 
 ## Backup & restore
 
