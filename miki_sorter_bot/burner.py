@@ -471,14 +471,31 @@ def _cli_backfill(
     max_minutes: float | None,
     jitter: float,
     use_takeout: bool = True,
+    loop: bool = False,
+    cli_args: "argparse.Namespace | None" = None,
 ) -> None:
-    from miki_sorter_bot.burner_backfill import backfill_and_report
+    from miki_sorter_bot.burner_backfill import backfill_and_report, run_backfill_loop_cli
 
     storage = Storage(settings.database_path)
     try:
+        repositories = storage.open()
+        if loop:
+            if topic_id is not None:
+                print("--loop sweeps all archive topics; ignoring the single topic id.")
+            run_backfill_loop_cli(
+                settings,
+                repositories,
+                chat_id=chat_id,
+                cycle_limit=cli_args.cycle_limit,
+                sleep_min=cli_args.sleep_min,
+                sleep_max=cli_args.sleep_max,
+                jitter=jitter,
+                use_takeout=use_takeout,
+            )
+            return
         _code, lines = backfill_and_report(
             settings,
-            storage.open(),
+            repositories,
             topic_id=topic_id,
             chat_id=chat_id,
             limit=limit,
@@ -600,6 +617,33 @@ def main() -> None:
         help="do NOT use a Telegram takeout (export) session — takeout is the "
         "safest history-read mode and is on by default; this forces a direct read",
     )
+    backfill_parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="run continuously in small cycles until caught up, then stop "
+        "(leave-it-running mode); Ctrl-C stops and resumes from the checkpoint",
+    )
+    backfill_parser.add_argument(
+        "--cycle-limit",
+        dest="cycle_limit",
+        type=int,
+        default=_bf.DEFAULT_CYCLE_LIMIT,
+        help=f"--loop: posts indexed per topic per cycle (default {_bf.DEFAULT_CYCLE_LIMIT})",
+    )
+    backfill_parser.add_argument(
+        "--sleep-min",
+        dest="sleep_min",
+        type=float,
+        default=_bf.DEFAULT_SLEEP_MIN_SECONDS,
+        help=f"--loop: min seconds between cycles (default {_bf.DEFAULT_SLEEP_MIN_SECONDS:.0f})",
+    )
+    backfill_parser.add_argument(
+        "--sleep-max",
+        dest="sleep_max",
+        type=float,
+        default=_bf.DEFAULT_SLEEP_MAX_SECONDS,
+        help=f"--loop: max seconds between cycles (default {_bf.DEFAULT_SLEEP_MAX_SECONDS:.0f})",
+    )
     bridge_add_parser = subparsers.add_parser(
         "bridge-add", help="register a forward-bridge (foreign group -> Miki source topic)"
     )
@@ -633,6 +677,8 @@ def main() -> None:
             max_minutes=args.max_minutes if args.max_minutes else None,
             jitter=args.jitter,
             use_takeout=args.use_takeout,
+            loop=args.loop,
+            cli_args=args,
         )
     elif args.command == "bridge-add":
         _cli_bridge_add(

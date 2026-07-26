@@ -167,7 +167,7 @@ def cmd_service_status(_args: argparse.Namespace) -> int:
 
 
 def cmd_backfill(args: argparse.Namespace) -> int:
-    from miki_sorter_bot.burner_backfill import backfill_and_report
+    from miki_sorter_bot.burner_backfill import backfill_and_report, run_backfill_loop_cli
 
     runtime = _open_runtime()
     try:
@@ -184,6 +184,20 @@ def cmd_backfill(args: argparse.Namespace) -> int:
             else:
                 print(f"No active topics registered for archive chat {chat_id}.")
                 return 0
+        # Continuous mode: small cycles + sleeps until caught up. Leave it running.
+        if args.loop:
+            if args.topic_id is not None:
+                print("--loop sweeps all archive topics; ignoring the single topic id.")
+            return run_backfill_loop_cli(
+                settings,
+                repositories,
+                chat_id=args.chat,
+                cycle_limit=args.cycle_limit,
+                sleep_min=args.sleep_min,
+                sleep_max=args.sleep_max,
+                jitter=args.jitter,
+                use_takeout=args.use_takeout,
+            )
         # 0 disables that cap (see the burner CLI); pass None to the runner.
         try:
             code, lines = backfill_and_report(
@@ -414,6 +428,23 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill.add_argument(
         "--no-takeout", dest="use_takeout", action="store_false",
         help="force a direct read instead of the safer Telegram takeout session",
+    )
+    backfill.add_argument(
+        "--loop", action="store_true",
+        help="run continuously in small cycles until caught up, then stop "
+        "(leave-it-running mode); Ctrl-C stops and resumes from the checkpoint",
+    )
+    backfill.add_argument(
+        "--cycle-limit", dest="cycle_limit", type=int, default=_bf.DEFAULT_CYCLE_LIMIT,
+        help=f"--loop: posts indexed per topic per cycle (default {_bf.DEFAULT_CYCLE_LIMIT})",
+    )
+    backfill.add_argument(
+        "--sleep-min", dest="sleep_min", type=float, default=_bf.DEFAULT_SLEEP_MIN_SECONDS,
+        help=f"--loop: min seconds between cycles (default {_bf.DEFAULT_SLEEP_MIN_SECONDS:.0f})",
+    )
+    backfill.add_argument(
+        "--sleep-max", dest="sleep_max", type=float, default=_bf.DEFAULT_SLEEP_MAX_SECONDS,
+        help=f"--loop: max seconds between cycles (default {_bf.DEFAULT_SLEEP_MAX_SECONDS:.0f})",
     )
     bot = sub.add_parser(
         "bot",

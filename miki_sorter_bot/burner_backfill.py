@@ -73,6 +73,14 @@ DEFAULT_JITTER_SECONDS = 0.5
 DEFAULT_BATCH_DELAY_SECONDS = 1.0
 DEFAULT_MAX_FLOOD_WAIT_SECONDS = 300.0
 
+# Continuous "loop" mode (leave running 24/7, stops when caught up), modelled on
+# the archiver's run→sleep→run cadence: each cycle indexes at most CYCLE_LIMIT
+# posts per topic, then sleeps a random SLEEP_MIN..SLEEP_MAX seconds. Small
+# bites + gentle pauses keep the account footprint low over a long backfill.
+DEFAULT_CYCLE_LIMIT = 100
+DEFAULT_SLEEP_MIN_SECONDS = 60.0
+DEFAULT_SLEEP_MAX_SECONDS = 180.0
+
 
 @dataclass(frozen=True, slots=True)
 class BackfillOutcome:
@@ -278,6 +286,7 @@ def backfill_all_topics(
     batch_delay: float = 0.0,
     jitter: float = 0.0,
     rand: Callable[[], float] = random.random,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[BackfillOutcome]:
     """Backfill EVERY active topic of ``chat_id`` in sequence, one shared client.
 
@@ -292,6 +301,8 @@ def backfill_all_topics(
     deadline = clock() + max_seconds if max_seconds is not None else None
     outcomes: list[BackfillOutcome] = []
     for topic in topics:
+        if should_stop is not None and should_stop():
+            break
         remaining: float | None = None
         if deadline is not None:
             remaining = deadline - clock()
@@ -511,3 +522,161 @@ def run_backfill_all(
             jitter=jitter,
             max_flood_wait_seconds=max_flood_wait_seconds,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BackfillLoopOutcome:
+    cycles: int
+    indexed: int
+    done: bool  # True = caught up (or no topics); False = stopped before completion
+
+
+def _drive_backfill_loop(
+    run_cycle: Callable[[], list[BackfillOutcome]],
+    *,
+    sleep_min: float,
+    sleep_max: float,
+    on_event: Callable[[str], None],
+    should_stop: Callable[[], bool],
+    wait: Callable[[float], object],
+    rand: Callable[[], float] = random.random,
+) -> BackfillLoopOutcome:
+    """Pure loop control (no Telegram): run a cycle, decide done/continue, sleep.
+
+    Caught-up test: a cycle that indexes nothing AND leaves every topic
+    ``exhausted`` (reached the end of its history) — there is no more history to
+    read, so the loop stops. Anything short of that (a topic cut off by the
+    per-cycle limit) means more remains, so it sleeps and goes again."""
+
+    cycle = 0
+    total = 0
+    while not should_stop():
+        cycle += 1
+        outcomes = run_cycle()
+        indexed = sum(o.indexed for o in outcomes)
+        total += indexed
+        on_event(f"cycle {cycle}: indexed {indexed} (running total {total})")
+        if not outcomes:
+            on_event("no active archive topics — nothing to backfill.")
+            return BackfillLoopOutcome(cycle, total, True)
+        if indexed == 0 and all(o.stop_reason == "exhausted" for o in outcomes):
+            on_event(
+                f"backfill complete — all topics caught up "
+                f"(indexed {total} over {cycle} cycle(s))."
+            )
+            return BackfillLoopOutcome(cycle, total, True)
+        if should_stop():
+            break
+        interval = sleep_min + (sleep_max - sleep_min) * rand()
+        on_event(f"sleeping {interval:.0f}s before the next cycle…")
+        wait(interval)
+    on_event("stopped — resume any time; each run continues from the checkpoint.")
+    return BackfillLoopOutcome(cycle, total, False)
+
+
+def run_backfill_loop(
+    settings: Settings,
+    repositories: SqliteRepositories,
+    *,
+    chat_id: int | None = None,
+    cycle_limit: int = DEFAULT_CYCLE_LIMIT,
+    sleep_min: float = DEFAULT_SLEEP_MIN_SECONDS,
+    sleep_max: float = DEFAULT_SLEEP_MAX_SECONDS,
+    jitter: float = DEFAULT_JITTER_SECONDS,
+    batch_delay: float = DEFAULT_BATCH_DELAY_SECONDS,
+    max_flood_wait_seconds: float | None = DEFAULT_MAX_FLOOD_WAIT_SECONDS,
+    use_takeout: bool = True,
+    on_event: Callable[[str], None] = lambda _message: None,
+    stop_event: object | None = None,
+) -> BackfillLoopOutcome:
+    """Continuously backfill in small cycles until caught up — the leave-it-running
+    model. One client/takeout session is held for the whole loop (re-opening one
+    every cycle would be wasteful and re-initiate takeout needlessly). ``cycle_limit``
+    bounds the posts indexed per topic per cycle; between cycles it sleeps a random
+    ``sleep_min..sleep_max`` seconds. A ``stop_event`` (threading.Event) stops it
+    cleanly between topics/cycles; the ``min_id`` checkpoint makes the next run
+    resume seamlessly."""
+
+    target_chat = chat_id if chat_id is not None else settings.archive_chat_id
+    should_stop = stop_event.is_set if stop_event is not None else (lambda: False)
+    # Interruptible sleep: Event.wait returns early when set; plain sleep otherwise.
+    wait = stop_event.wait if stop_event is not None else time.sleep
+    with _connected_client(settings, use_takeout=use_takeout) as client:
+        def run_cycle() -> list[BackfillOutcome]:
+            def factory_for(thread_id: int) -> HistoryFactory:
+                return telethon_history_factory(client, target_chat, thread_id)
+
+            return backfill_all_topics(
+                repositories,
+                settings,
+                chat_id=target_chat,
+                factory_for=factory_for,
+                limit=cycle_limit,
+                max_seconds=None,
+                batch_delay=batch_delay,
+                jitter=jitter,
+                max_flood_wait_seconds=max_flood_wait_seconds,
+                should_stop=should_stop,
+            )
+
+        return _drive_backfill_loop(
+            run_cycle,
+            sleep_min=sleep_min,
+            sleep_max=sleep_max,
+            on_event=on_event,
+            should_stop=should_stop,
+            wait=wait,
+        )
+
+
+def run_backfill_loop_cli(
+    settings: Settings,
+    repositories: SqliteRepositories,
+    *,
+    chat_id: int | None = None,
+    cycle_limit: int = DEFAULT_CYCLE_LIMIT,
+    sleep_min: float = DEFAULT_SLEEP_MIN_SECONDS,
+    sleep_max: float = DEFAULT_SLEEP_MAX_SECONDS,
+    jitter: float = DEFAULT_JITTER_SECONDS,
+    use_takeout: bool = True,
+) -> int:
+    """Run the continuous loop from a terminal: install SIGINT/SIGTERM handlers
+    for a clean stop, print progress, and return an exit code. Shared by
+    ``miki-ops backfill --loop`` and ``miki-burner backfill --loop``."""
+
+    import signal
+    import threading
+
+    stop = threading.Event()
+
+    def _request_stop(*_: object) -> None:
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _request_stop)
+        except (ValueError, OSError):  # not the main thread / unsupported signal
+            pass
+
+    print(
+        f"Backfill loop — up to {cycle_limit} post(s)/topic per cycle, sleeping "
+        f"{sleep_min:.0f}-{sleep_max:.0f}s between cycles. Runs until caught up; "
+        "Ctrl-C to stop (resumes from the checkpoint next time)."
+    )
+    try:
+        outcome = run_backfill_loop(
+            settings,
+            repositories,
+            chat_id=chat_id,
+            cycle_limit=cycle_limit,
+            sleep_min=sleep_min,
+            sleep_max=sleep_max,
+            jitter=jitter,
+            use_takeout=use_takeout,
+            on_event=print,
+            stop_event=stop,
+        )
+    except SystemExit as error:  # burner not configured
+        print(str(error))
+        return 2
+    return 0 if outcome.done else 130

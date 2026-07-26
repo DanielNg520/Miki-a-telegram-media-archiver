@@ -461,3 +461,58 @@ def test_use_takeout_threads_through_single_topic(monkeypatch) -> None:
     monkeypatch.setattr(_bf, "run_backfill", fake_one)
     _bf.backfill_and_report(_settings(), None, topic_id=10, use_takeout=False)
     assert captured["use_takeout"] is False
+
+
+def test_loop_stops_when_all_topics_exhausted() -> None:
+    # cycle 1 indexes some (limit-capped, more to do); cycle 2 indexes nothing and
+    # every topic is exhausted -> caught up, loop stops.
+    cycles = iter([
+        [BackfillOutcome(-200, 10, 100, 100, 100, 0, "limit")],
+        [BackfillOutcome(-200, 10, 5, 0, 105, 100, "exhausted")],
+    ])
+    events: list[str] = []
+    slept: list[float] = []
+    outcome = _bf._drive_backfill_loop(
+        lambda: next(cycles),
+        sleep_min=10, sleep_max=10,
+        on_event=events.append,
+        should_stop=lambda: False,
+        wait=slept.append,
+        rand=lambda: 0.0,
+    )
+    assert outcome.done is True
+    assert outcome.cycles == 2
+    assert outcome.indexed == 100
+    assert slept == [10]  # slept once, between the two cycles
+    assert any("complete" in e for e in events)
+
+
+def test_loop_stops_on_stop_event() -> None:
+    state = {"stop": False}
+
+    def run_cycle():
+        state["stop"] = True  # request stop after the first cycle
+        return [BackfillOutcome(-200, 10, 100, 100, 100, 0, "limit")]  # more to do
+
+    outcome = _bf._drive_backfill_loop(
+        run_cycle,
+        sleep_min=10, sleep_max=10,
+        on_event=lambda _m: None,
+        should_stop=lambda: state["stop"],
+        wait=lambda _s: None,
+        rand=lambda: 0.0,
+    )
+    assert outcome.done is False  # stopped before catching up
+    assert outcome.cycles == 1
+
+
+def test_loop_no_topics_is_done_immediately() -> None:
+    outcome = _bf._drive_backfill_loop(
+        lambda: [],
+        sleep_min=10, sleep_max=10,
+        on_event=lambda _m: None,
+        should_stop=lambda: False,
+        wait=lambda _s: None,
+    )
+    assert outcome.done is True
+    assert outcome.cycles == 1

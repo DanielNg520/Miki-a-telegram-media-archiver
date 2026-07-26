@@ -98,10 +98,16 @@ topic id to sweep **every active archive topic**, resolving the chat (`ARCHIVE_C
 ids from the `topics` table, so no ids need be passed:
 
 ```bash
-miki-ops backfill                  # sweep all active archive topics
+miki-ops backfill                  # sweep all active archive topics once
 miki-ops backfill <topic_id>       # one topic
 miki-burner backfill [<topic_id>]  # same, from the burner CLI
+miki-ops backfill --loop           # leave-it-running: small cycles + sleeps until caught up
 ```
+
+**Loop mode** (`--loop`) mirrors the archiver's run→sleep→run cadence: each cycle indexes at most
+`--cycle-limit` posts per topic, then sleeps a random `--sleep-min..--sleep-max` seconds, repeating
+until every topic is caught up (then it stops on its own). One client/takeout session is held for
+the whole loop; Ctrl-C (or SIGTERM) stops cleanly and the `min_id` checkpoint resumes the next run.
 
 **Account safety** — the burner is a real user account, so ban risk is real; the crawl is built to
 be gentle:
