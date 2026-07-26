@@ -433,3 +433,31 @@ def test_backfill_and_report_no_topics(monkeypatch) -> None:
     code, lines = _bf.backfill_and_report(_settings(), None, topic_id=None)
     assert code == 0
     assert lines == ["Backfill: no active archive topics to index."]
+
+
+def test_use_takeout_defaults_on_and_threads_through(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_all(*_a, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(_bf, "run_backfill_all", fake_all)
+    _bf.backfill_and_report(_settings(), None, topic_id=None)
+    assert captured["use_takeout"] is True  # safest mode is the default
+
+    captured.clear()
+    _bf.backfill_and_report(_settings(), None, topic_id=None, use_takeout=False)
+    assert captured["use_takeout"] is False
+
+
+def test_use_takeout_threads_through_single_topic(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_one(*_a, **kwargs):
+        captured.update(kwargs)
+        return BackfillOutcome(-200, 10, 0, 0, 0, 0, "exhausted")
+
+    monkeypatch.setattr(_bf, "run_backfill", fake_one)
+    _bf.backfill_and_report(_settings(), None, topic_id=10, use_takeout=False)
+    assert captured["use_takeout"] is False

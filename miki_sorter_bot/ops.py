@@ -194,6 +194,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
                 limit=args.limit if args.limit else None,
                 max_minutes=args.max_minutes if args.max_minutes else None,
                 jitter=args.jitter,
+                use_takeout=args.use_takeout,
             )
         except SystemExit as exc:  # e.g. burner not configured
             print(str(exc))
@@ -409,6 +410,10 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill.add_argument(
         "--jitter", type=float, default=_bf.DEFAULT_JITTER_SECONDS,
         help=f"random extra seconds per inter-batch pause (default {_bf.DEFAULT_JITTER_SECONDS})",
+    )
+    backfill.add_argument(
+        "--no-takeout", dest="use_takeout", action="store_false",
+        help="force a direct read instead of the safer Telegram takeout session",
     )
     bot = sub.add_parser(
         "bot",

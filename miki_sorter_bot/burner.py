@@ -470,6 +470,7 @@ def _cli_backfill(
     limit: int | None,
     max_minutes: float | None,
     jitter: float,
+    use_takeout: bool = True,
 ) -> None:
     from miki_sorter_bot.burner_backfill import backfill_and_report
 
@@ -483,6 +484,7 @@ def _cli_backfill(
             limit=limit,
             max_minutes=max_minutes,
             jitter=jitter,
+            use_takeout=use_takeout,
         )
     finally:
         storage.close()
@@ -591,6 +593,13 @@ def main() -> None:
         help=f"random extra seconds added to each inter-batch pause, for a less "
         f"robotic request cadence (default {_bf.DEFAULT_JITTER_SECONDS})",
     )
+    backfill_parser.add_argument(
+        "--no-takeout",
+        dest="use_takeout",
+        action="store_false",
+        help="do NOT use a Telegram takeout (export) session — takeout is the "
+        "safest history-read mode and is on by default; this forces a direct read",
+    )
     bridge_add_parser = subparsers.add_parser(
         "bridge-add", help="register a forward-bridge (foreign group -> Miki source topic)"
     )
@@ -623,6 +632,7 @@ def main() -> None:
             limit=args.limit if args.limit else None,
             max_minutes=args.max_minutes if args.max_minutes else None,
             jitter=args.jitter,
+            use_takeout=args.use_takeout,
         )
     elif args.command == "bridge-add":
         _cli_bridge_add(

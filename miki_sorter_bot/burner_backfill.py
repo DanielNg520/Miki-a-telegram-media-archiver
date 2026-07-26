@@ -321,11 +321,19 @@ def backfill_all_topics(
 
 
 @contextmanager
-def _connected_client(settings: Settings) -> Iterator[object]:
-    """A connected, authorized Telethon client — reused across topics so a sweep
+def _connected_client(settings: Settings, *, use_takeout: bool = True) -> Iterator[object]:
+    """A connected, authorized Telethon reader — reused across topics so a sweep
     does not reconnect per topic (wasteful and itself ban-prone). Connects
     WITHOUT an interactive login: an invalid/expired session fails fast with a
-    clear message instead of blocking on a console prompt in a headless run."""
+    clear message instead of blocking on a console prompt in a headless run.
+
+    Account safety: by default the reader is a Telegram **takeout** session —
+    Telegram's sanctioned data-export mode. Telegram treats takeout history reads
+    as a legitimate export (higher limits, far less likely to trip anti-abuse),
+    so it is the gentlest way to crawl history on a real account. If a takeout
+    can't be started (e.g. Telegram imposes an init delay, or the session must be
+    confirmed elsewhere), fall back to a throttled direct read rather than fail —
+    the run still works, just without the export privilege."""
 
     if not settings.burner_configured:
         raise SystemExit(
@@ -349,7 +357,34 @@ def _connected_client(settings: Settings) -> Iterator[object]:
                 "Burner session is not authorized (expired or invalid). Re-generate "
                 "TELETHON_SESSION; backfill will not attempt an interactive login."
             )
-        yield client
+        takeout_cm = None
+        reader: object = client
+        if use_takeout:
+            try:
+                # finalize=True commits the takeout on a clean exit so it is not
+                # left dangling for the next run. Entering it initiates the
+                # session (this is where an init-delay would surface).
+                candidate = client.takeout(finalize=True)
+                reader = candidate.__enter__()
+                takeout_cm = candidate
+                logger.info("Backfill using a Telegram takeout session (safest history read).")
+            except SystemExit:
+                raise
+            except Exception as error:  # takeout unavailable — degrade, don't fail
+                logger.warning(
+                    "Takeout session unavailable (%s); falling back to a throttled "
+                    "direct history read.",
+                    error,
+                )
+                reader = client
+        try:
+            yield reader
+        finally:
+            if takeout_cm is not None:
+                try:
+                    takeout_cm.__exit__(None, None, None)
+                except Exception as error:  # noqa: BLE001 - finalize is best-effort
+                    logger.warning("Takeout finalize failed: %s", error)
     finally:
         client.disconnect()
 
@@ -365,12 +400,13 @@ def run_backfill(
     jitter: float = DEFAULT_JITTER_SECONDS,
     batch_delay: float = DEFAULT_BATCH_DELAY_SECONDS,
     max_flood_wait_seconds: float | None = DEFAULT_MAX_FLOOD_WAIT_SECONDS,
+    use_takeout: bool = True,
 ) -> BackfillOutcome:
     """Open a Telethon client and backfill a single archive topic, then close it."""
 
     target_chat = chat_id if chat_id is not None else settings.archive_chat_id
     max_seconds = max_minutes * 60.0 if max_minutes is not None else None
-    with _connected_client(settings) as client:
+    with _connected_client(settings, use_takeout=use_takeout) as client:
         factory = telethon_history_factory(client, target_chat, topic_id)
         return backfill_topic(
             repositories,
@@ -395,6 +431,7 @@ def backfill_and_report(
     limit: int | None = None,
     max_minutes: float | None = None,
     jitter: float = DEFAULT_JITTER_SECONDS,
+    use_takeout: bool = True,
 ) -> tuple[int, list[str]]:
     """Run a single-topic or all-topics backfill and format a human report.
 
@@ -407,13 +444,14 @@ def backfill_and_report(
     if topic_id is None:
         outcomes = run_backfill_all(
             settings, repositories, chat_id=chat_id, limit=limit,
-            max_minutes=max_minutes, jitter=jitter,
+            max_minutes=max_minutes, jitter=jitter, use_takeout=use_takeout,
         )
     else:
         outcomes = [
             run_backfill(
                 settings, repositories, topic_id=topic_id, chat_id=chat_id,
                 limit=limit, max_minutes=max_minutes, jitter=jitter,
+                use_takeout=use_takeout,
             )
         ]
 
@@ -451,13 +489,14 @@ def run_backfill_all(
     jitter: float = DEFAULT_JITTER_SECONDS,
     batch_delay: float = DEFAULT_BATCH_DELAY_SECONDS,
     max_flood_wait_seconds: float | None = DEFAULT_MAX_FLOOD_WAIT_SECONDS,
+    use_takeout: bool = True,
 ) -> list[BackfillOutcome]:
     """Sweep every active archive topic with one shared client (no topic id
     needed). ``max_minutes`` is the budget for the WHOLE sweep."""
 
     target_chat = chat_id if chat_id is not None else settings.archive_chat_id
     max_seconds = max_minutes * 60.0 if max_minutes is not None else None
-    with _connected_client(settings) as client:
+    with _connected_client(settings, use_takeout=use_takeout) as client:
         def factory_for(thread_id: int) -> HistoryFactory:
             return telethon_history_factory(client, target_chat, thread_id)
 
