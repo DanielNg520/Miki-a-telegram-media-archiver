@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miki-a-friendly-sorter-bot"
+version = "0.1.0"
+description = "Telegram forum-topic sorter bot for copying media/messages into archive topics."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-settings>=2.2.1",
+    "python-dotenv>=1.0.1",
+    "python-telegram-bot[job-queue,webhooks]>=21.4",
+]
+
+[project.optional-dependencies]
+monitoring = [
+    "sentry-sdk>=2.0.0",
+]
+burner = [
+    "telethon>=1.36",
+    "pyrage>=1.1",
+]
+dev = [
+    "bandit>=1.9.0",
+    "mypy>=1.15.0",
+    "pip-audit>=2.9.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.11.0",
+]
+
+[project.scripts]
+miki-sorter = "miki_sorter_bot.main:main"
+miki-show-ids = "miki_sorter_bot.show_ids:main"
+miki-doctor = "miki_sorter_bot.diagnostics:main"
+miki-ops = "miki_sorter_bot.ops:main"
+miki-burner = "miki_sorter_bot.burner:main"
+miki-burner-login = "miki_sorter_bot.burner_session:main"
+
+[tool.setuptools.packages.find]
+include = ["miki_sorter_bot*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

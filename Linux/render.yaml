@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: miki-sorter
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: RUN_MODE
+        value: webhook
+      - key: WEBHOOK_LISTEN
+        value: 0.0.0.0
+      - key: WEBHOOK_PATH
+        value: /telegram/webhook
+      - key: TELEGRAM_BOOTSTRAP_RETRIES
+        value: "-1"
+      - key: TELEGRAM_DROP_PENDING_UPDATES
+        value: "false"
+      - key: SORT_DRY_RUN
+        value: "false"
