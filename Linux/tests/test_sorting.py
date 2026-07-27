@@ -2070,3 +2070,34 @@ def test_expired_lookback_media_files_under_default_topic(
 
     assert repositories.get_delivery(-100, 12, -200, 317).status == "sent"
     assert repositories.metrics_snapshot()["lookback_expired_default_deliveries"] == 1
+
+
+def test_lookback_trigger_with_conflicting_tags_files_under_default_and_warns(
+    database_connection,
+) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _double_tag_routes(repositories)
+    indexing = SimpleNamespace(index_copy=Mock(return_value=True))
+    service = SortingService(_settings(default_topic_id=317), repositories, indexing)
+    bot = _photo_bot()
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+    tag_message = _text_message("#Japan #Codes", message_id=13)
+
+    async def run() -> None:
+        # Media posted first with no caption, then a double-tagged follow-up.
+        await service.handle_update(
+            SimpleNamespace(effective_message=_message("", message_id=12), effective_chat=chat),
+            context,
+        )
+        await service.handle_update(
+            SimpleNamespace(effective_message=tag_message, effective_chat=chat),
+            context,
+        )
+
+    asyncio.run(run())
+
+    assert repositories.get_delivery(-100, 12, -200, 317).status == "sent"
+    tag_message.reply_text.assert_awaited_once()
+    warning = tag_message.reply_text.await_args.args[0]
+    assert "#japan" in warning and "#codes" in warning

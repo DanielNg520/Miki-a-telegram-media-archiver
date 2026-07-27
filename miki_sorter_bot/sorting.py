@@ -479,6 +479,12 @@ class SortingService:
         if getattr(sender, "id", None) == context.bot.id:
             return
         decision = self._matcher.decide(text)
+        if decision.status == "conflict":
+            # The follow-up tag itself carries two conflicting topic hashtags:
+            # warn the poster and file the buffered media under the default topic,
+            # mirroring the captioned-media conflict path.
+            await self._route_lookback_conflict(message, chat, source_thread_id, decision, context)
+            return
         if decision.status != "matched":
             return
         # 1) Quick tag: an album posted seconds ago is still assembling/awaiting a
@@ -501,6 +507,37 @@ class SortingService:
             },
         )
         await self._deliver_captured(captured, chat.id, decision, context)
+
+    async def _route_lookback_conflict(
+        self,
+        message: Any,
+        chat: Any,
+        source_thread_id: int | None,
+        decision: SortDecision,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle a look-back trigger whose own tags disagree.
+
+        Warns the poster (for a genuine multi-hashtag clash) and files the media
+        it would have claimed under the default topic. When no default topic is
+        configured, the media is left buffered to expire, as elsewhere.
+        """
+
+        await self._reply_double_tag(message, decision)
+        fallback = self._default_decision(f"conflict-default:{decision.reason}")
+        if fallback is None:
+            return
+        # An album still assembling: hand it the default decision so its flush
+        # delivers it (nothing is in the look-back buffer yet).
+        if self._attach_decision_to_pending_album(chat.id, source_thread_id, fallback):
+            self._repositories.increment_metric("sort_conflicts", 1)
+            return
+        captured = self._lookback.claim_latest(chat.id, source_thread_id)
+        if captured is None:
+            return
+        for buffered in captured.messages:
+            self._record_skip(buffered, decision)
+        await self._deliver_captured(captured, chat.id, fallback, context)
 
     def _attach_decision_to_pending_album(
         self,
