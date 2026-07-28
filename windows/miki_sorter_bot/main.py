@@ -198,15 +198,6 @@ def _run(settings: Settings) -> None:
     application = (
         Application.builder()
         .token(settings.bot_token)
-        # Telegram HTTP timeouts. PTB defaults (~5s) are far too short for
-        # uploading media groups/albums, which was causing grouped-album
-        # deliveries to time out ("outcome_unknown") and pile up as dead
-        # letters. media_write_timeout governs the upload leg specifically.
-        .connect_timeout(30)
-        .read_timeout(60)
-        .write_timeout(120)
-        .media_write_timeout(300)
-        .pool_timeout(30)
         .post_init(startup_tasks)
         .post_stop(stop_workers)
         .post_shutdown(close_storage)

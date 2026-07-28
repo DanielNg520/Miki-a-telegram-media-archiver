@@ -1,13 +1,10 @@
 """Cross-platform service management for the Miki sorter bot.
 
 ``miki-ops install|uninstall|load|unload|restart|status`` delegate here so the
-same verbs work on Linux (systemd), macOS (launchd) and Windows, and degrade
-with guidance elsewhere. The public API is a handful of functions returning
-``Result``; the CLI prints the messages and propagates the code.
+same verbs work on macOS (launchd) and Windows, and degrade with guidance
+elsewhere. The public API is a handful of functions returning ``Result``; the
+CLI prints the messages and propagates the code.
 
-Linux  — a systemd user service (``systemctl --user``) with Restart=on-failure,
-          enabled to start at logon (``loginctl enable-linger`` recommended so it
-          runs without an active session). No root required.
 macOS  — a launchd LaunchAgent (RunAtLoad + KeepAlive), managed with launchctl.
 Windows — no-admin autostart via a hidden launcher in the user's Startup folder
           (Task Scheduler registration requires elevation), plus process
@@ -33,9 +30,6 @@ WINDOWS_IMAGE = "miki-sorter.exe"
 LOG_DIR = Path("~/.local/log").expanduser()
 
 LAUNCH_AGENTS = Path("~/Library/LaunchAgents").expanduser()
-
-SYSTEMD_USER_DIR = Path("~/.config/systemd/user").expanduser()
-SYSTEMD_UNIT = f"{SERVICE_NAME}-sorter.service"
 
 
 @dataclass(slots=True)
@@ -70,8 +64,6 @@ def install(workdir: Path) -> Result:
         return _mac_install(workdir)
     if sys.platform == "win32":
         return _win_install(workdir)
-    if sys.platform.startswith("linux"):
-        return _linux_install(workdir)
     return _unsupported()
 
 
@@ -80,8 +72,6 @@ def uninstall() -> Result:
         return _mac_uninstall()
     if sys.platform == "win32":
         return _win_uninstall()
-    if sys.platform.startswith("linux"):
-        return _linux_uninstall()
     return _unsupported()
 
 
@@ -90,8 +80,6 @@ def load() -> Result:
         return _mac_load()
     if sys.platform == "win32":
         return _win_load()
-    if sys.platform.startswith("linux"):
-        return _linux_load()
     return _unsupported()
 
 
@@ -100,8 +88,6 @@ def unload() -> Result:
         return _mac_unload()
     if sys.platform == "win32":
         return _win_unload()
-    if sys.platform.startswith("linux"):
-        return _linux_unload()
     return _unsupported()
 
 
@@ -110,8 +96,6 @@ def restart() -> Result:
         return _mac_restart()
     if sys.platform == "win32":
         return _win_restart()
-    if sys.platform.startswith("linux"):
-        return _linux_restart()
     return _unsupported()
 
 
@@ -129,14 +113,6 @@ def status() -> Result:
     if sys.platform == "darwin":
         running = _mac_running()
         return _ok(f"miki: {'running' if running else 'not running'}")
-    if sys.platform.startswith("linux"):
-        running = _linux_running()
-        installed = _systemd_unit_path().exists()
-        note = "" if running else (
-            "  (autostart installed — starts at next logon)" if installed
-            else "  (autostart not installed — run `miki-ops install`)"
-        )
-        return _ok(f"miki: {'running' if running else 'not running'}{note}")
     return _unsupported()
 
 
@@ -145,8 +121,6 @@ def is_running() -> bool:
         return _win_pid() is not None
     if sys.platform == "darwin":
         return _mac_running()
-    if sys.platform.startswith("linux"):
-        return _linux_running()
     return False
 
 
@@ -282,118 +256,6 @@ def _win_pid() -> int | None:
             except (IndexError, ValueError):
                 return None
     return None
-
-
-# ── Linux: systemd user service ─────────────────────────────────────────────
-
-def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["systemctl", "--user", *args], capture_output=True, text=True
-    )
-
-
-def _systemd_unit_path() -> Path:
-    return SYSTEMD_USER_DIR / SYSTEMD_UNIT
-
-
-def _systemd_unit_text(program: str, workdir: Path) -> str:
-    bindir = str(Path(program).parent)
-    log = LOG_DIR / "miki.out.log"
-    return f"""[Unit]
-Description=Miki Telegram sorter bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory={workdir}
-Environment=PATH={bindir}:/usr/local/bin:/usr/bin:/bin
-ExecStart={program}
-Restart=on-failure
-RestartSec=30
-StandardOutput=append:{log}
-StandardError=append:{log}
-
-[Install]
-WantedBy=default.target
-"""
-
-
-def _linux_install(workdir: Path) -> Result:
-    program = resolve_program()
-    if program is None:
-        return _err(
-            f"miki: '{PROGRAM_NAME}' not found on PATH or ~/.local/bin — install it "
-            "first (e.g. `pip install .`), then re-run from the project dir."
-        )
-    if shutil.which("systemctl") is None:
-        return _err(
-            "miki: systemctl not found. This host has no systemd user session; run "
-            "the bot directly (`miki-sorter`) or add it to your init system manually."
-        )
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    path = _systemd_unit_path()
-    path.write_text(_systemd_unit_text(program, workdir), encoding="utf-8")
-    _systemctl("daemon-reload")
-    enabled = _systemctl("enable", SYSTEMD_UNIT)
-    messages = [f"miki: wrote {path} -> {program}"]
-    if enabled.returncode != 0:
-        messages.append(
-            f"miki: warning — could not enable autostart: {enabled.stderr.strip()}"
-        )
-    else:
-        messages.append("miki: enabled autostart at logon")
-    messages.append(
-        "installed. Start now with:  miki-ops load  "
-        "(tip: `loginctl enable-linger $USER` to run without an active session)"
-    )
-    return _ok(*messages)
-
-
-def _linux_uninstall() -> Result:
-    messages = list(_linux_unload().messages)
-    _systemctl("disable", SYSTEMD_UNIT)
-    path = _systemd_unit_path()
-    if path.exists():
-        path.unlink()
-        messages.append(f"miki: removed {path}")
-    _systemctl("daemon-reload")
-    return _ok(*messages)
-
-
-def _linux_load() -> Result:
-    path = _systemd_unit_path()
-    if not path.exists():
-        return _err(f"miki: unit missing ({path}) — run `miki-ops install` first")
-    result = _systemctl("start", SYSTEMD_UNIT)
-    if result.returncode == 0:
-        return _ok("miki: started")
-    return _err(f"miki: load failed - {result.stderr.strip()}")
-
-
-def _linux_unload() -> Result:
-    if not _systemd_unit_path().exists():
-        return _ok()
-    result = _systemctl("stop", SYSTEMD_UNIT)
-    if result.returncode == 0:
-        return _ok("miki: stopped")
-    return _err(f"miki: unload failed - {result.stderr.strip()}")
-
-
-def _linux_restart() -> Result:
-    path = _systemd_unit_path()
-    if not path.exists():
-        return _err(f"miki: unit missing ({path}) — run `miki-ops install` first")
-    result = _systemctl("restart", SYSTEMD_UNIT)
-    if result.returncode == 0:
-        return _ok("miki: restarted")
-    return _err(f"miki: restart failed - {result.stderr.strip()}")
-
-
-def _linux_running() -> bool:
-    result = _systemctl("is-active", SYSTEMD_UNIT)
-    return result.stdout.strip() == "active"
 
 
 # ── macOS: launchd LaunchAgent ──────────────────────────────────────────────

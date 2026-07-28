@@ -184,10 +184,9 @@ That runs the test suite, bytecode import compilation, dependency consistency ch
 `miki-ops` is the terminal console for running Miki on your own machine. It manages the service,
 mirrors every Telegram admin command, and drives history backfill.
 
-**Service management** — cross-platform and no-admin (systemd user service on Linux, launchd
-LaunchAgent on macOS, a hidden Startup-folder launcher on Windows). `install` captures the current
-directory so the service finds your `.env`. On Linux, run `loginctl enable-linger $USER` once so the
-service keeps running without an active login session:
+**Service management** — cross-platform and no-admin (launchd LaunchAgent on macOS, a hidden
+Startup-folder launcher on Windows). `install` captures the current directory so the service finds
+your `.env`:
 
 ```bash
 miki-ops install          # register autostart-at-logon

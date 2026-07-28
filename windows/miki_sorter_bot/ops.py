@@ -399,8 +399,8 @@ def _build_parser() -> argparse.ArgumentParser:
     rotate.add_argument("--keep", type=_non_negative_int, default=DEFAULT_KEEP)
     sub.add_parser(
         "install",
-        help="register miki-sorter for autostart (systemd on Linux, launchd on "
-        "macOS, Startup folder on Windows) using the current directory for .env",
+        help="register miki-sorter for autostart (launchd on macOS, Startup "
+        "folder on Windows) using the current directory for .env",
     )
     sub.add_parser("uninstall", help="stop and remove the autostart registration")
     sub.add_parser("load", help="start the managed service now")

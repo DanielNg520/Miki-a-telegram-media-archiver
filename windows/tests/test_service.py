@@ -46,50 +46,6 @@ def test_win_install_without_program_fails(tmp_path, monkeypatch) -> None:
     assert "not found" in result.messages[0]
 
 
-def test_linux_install_writes_systemd_unit(tmp_path, monkeypatch) -> None:
-    # _linux_install writes the unit and shells out to systemctl; stub systemctl
-    # and shutil.which so it can be exercised on any host by redirecting dirs.
-    logdir = tmp_path / "log"
-    unitdir = tmp_path / "systemd"
-    monkeypatch.setattr(service, "LOG_DIR", logdir)
-    monkeypatch.setattr(service, "SYSTEMD_USER_DIR", unitdir)
-    program = tmp_path / "venv" / "bin" / "miki-sorter"
-    monkeypatch.setattr(service, "resolve_program", lambda: str(program))
-    monkeypatch.setattr(service.shutil, "which", lambda _name: "/usr/bin/systemctl")
-    monkeypatch.setattr(
-        service, "_systemctl", lambda *args: _fake_completed(0, "", "")
-    )
-
-    workdir = tmp_path / "project"
-    result = service._linux_install(workdir)
-
-    assert result.code == 0
-    unit = unitdir / service.SYSTEMD_UNIT
-    assert unit.exists()
-    text = unit.read_text(encoding="utf-8")
-    assert f"WorkingDirectory={workdir}" in text  # cd to the .env directory
-    assert f"ExecStart={program}" in text          # runs the resolved program
-    assert str(logdir / "miki.out.log") in text    # redirects to the log
-    assert "Restart=on-failure" in text            # crash-restart
-
-
-def test_linux_install_without_program_fails(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(service, "LOG_DIR", tmp_path / "log")
-    monkeypatch.setattr(service, "SYSTEMD_USER_DIR", tmp_path / "systemd")
-    monkeypatch.setattr(service, "resolve_program", lambda: None)
-
-    result = service._linux_install(tmp_path)
-
-    assert result.code == 1
-    assert "not found" in result.messages[0]
-
-
-def _fake_completed(code, out, err):
-    import subprocess
-
-    return subprocess.CompletedProcess(args=[], returncode=code, stdout=out, stderr=err)
-
-
 def test_unsupported_platform_is_reported(monkeypatch) -> None:
     monkeypatch.setattr(service.sys, "platform", "sunos")
     result = service.install(Path("."))
