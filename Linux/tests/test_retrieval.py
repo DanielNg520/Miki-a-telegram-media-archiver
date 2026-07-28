@@ -36,7 +36,13 @@ def _media(
     thread_id: int = 9,
     album: str | None = None,
     created_at: datetime | None = None,
+    kind: str = "photo",
 ) -> SimpleNamespace:
+    fields = {
+        name: None
+        for name in ("animation", "audio", "document", "photo", "sticker", "video", "video_note", "voice")
+    }
+    fields[kind] = [object()] if kind == "photo" else object()
     return SimpleNamespace(
         message_id=message_id,
         message_thread_id=thread_id,
@@ -45,14 +51,7 @@ def _media(
         text=None,
         date=created_at or datetime(2026, 6, 13, tzinfo=UTC),
         from_user=SimpleNamespace(id=10, is_bot=False),
-        photo=[object()],
-        animation=None,
-        audio=None,
-        document=None,
-        sticker=None,
-        video=None,
-        video_note=None,
-        voice=None,
+        **fields,
     )
 
 
@@ -206,6 +205,36 @@ def test_search_supports_all_any_newest_first_and_album_dedup(database_connectio
     assert [post.source_message_id for post in all_results] == [1]
     assert [post.source_message_id for post in any_results] == [1, 2, 3]
     assert any_results[1].logical_post_key == any_results[2].logical_post_key
+
+
+def test_search_excludes_documents(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    indexer.index(_media(1, "Tokyo photo", kind="photo"), -200)
+    indexer.index(_media(2, "Tokyo document", kind="document"), -200)
+
+    results = repositories.search_posts(-200, 9, ("tokyo",), "any", 10)
+
+    assert [post.source_message_id for post in results] == [1]
+
+
+def test_search_prioritizes_videos_over_photos(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    now = datetime(2026, 6, 13, tzinfo=UTC)
+    # Photo is newer, but the video should still be delivered first.
+    indexer.index(_media(1, "Tokyo photo", kind="photo", created_at=now), -200)
+    indexer.index(
+        _media(2, "Tokyo video", kind="video", created_at=now - timedelta(days=1)), -200
+    )
+
+    results = repositories.search_posts(-200, 9, ("tokyo",), "any", 10)
+
+    assert [post.source_message_id for post in results] == [2, 1]
 
 
 def test_all_matching_aggregates_tokens_across_album_members(database_connection) -> None:

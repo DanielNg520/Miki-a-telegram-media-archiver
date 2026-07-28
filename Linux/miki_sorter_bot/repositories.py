@@ -868,20 +868,22 @@ class SqliteRepositories:
             WITH matching_groups AS (
                 SELECT posts.logical_post_key,
                        MAX(COALESCE(posts.message_created_at, posts.created_at)) AS group_time,
+                       MAX(CASE WHEN posts.media_type = 'video' THEN 1 ELSE 0 END) AS has_video,
                        COUNT(DISTINCT post_tokens.normalized_value) AS matched_count
                 FROM posts
                 JOIN post_tokens ON post_tokens.post_id = posts.id
                 WHERE posts.source_chat_id = ?
                   AND posts.source_thread_id = ?
                   AND posts.is_available = 1
+                  AND posts.media_type != 'document'
                   AND post_tokens.normalized_value IN ({placeholders})
                 GROUP BY posts.logical_post_key
                 HAVING matched_count {comparison}
             ),
             selected_groups AS (
-                SELECT logical_post_key, group_time
+                SELECT logical_post_key, group_time, has_video
                 FROM matching_groups
-                ORDER BY group_time DESC, logical_post_key DESC
+                ORDER BY has_video DESC, group_time DESC, logical_post_key DESC
                 LIMIT ?
             )
             SELECT posts.id, posts.source_chat_id, posts.source_thread_id,
@@ -895,7 +897,9 @@ class SqliteRepositories:
             WHERE posts.source_chat_id = ?
               AND posts.source_thread_id = ?
               AND posts.is_available = 1
-            ORDER BY selected_groups.group_time DESC,
+              AND posts.media_type != 'document'
+            ORDER BY selected_groups.has_video DESC,
+                     selected_groups.group_time DESC,
                      posts.logical_post_key DESC,
                      posts.source_message_id ASC
             """,
