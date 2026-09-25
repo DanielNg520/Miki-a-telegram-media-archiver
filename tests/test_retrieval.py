@@ -9,12 +9,15 @@ import pytest
 from telegram.error import BadRequest
 
 from miki_sorter_bot.indexing import MessageIndexer
+from miki_sorter_bot.message_deletion import MessageDeletionService
 from miki_sorter_bot.repositories import SqliteRepositories
 from miki_sorter_bot.retrieval import (
+    RecoveredRequestMessage,
     RequestValidationError,
     RetrievalService,
     parse_request,
 )
+from miki_sorter_bot.settings_registry import LiveSettings
 
 
 def _settings(default_request_limit: int = 20) -> SimpleNamespace:
@@ -562,3 +565,157 @@ def test_search_does_not_prefix_match_short_query(database_connection) -> None:
     indexer.index(_media(22, "ABC1234", created_at=datetime.now(tz=UTC)), -200)
     results = repositories.search_posts(-200, 9, ("abc",), "any", 10)
     assert all(post.source_message_id != 22 for post in results)
+
+
+def test_all_copies_replies_and_request_message_scheduled(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    deletion = MessageDeletionService(repositories, clock=lambda: 1000.0)
+    service = RetrievalService(
+        _settings(),
+        repositories,
+        deletion=deletion,
+        live_settings=LiveSettings(_settings(), repositories),
+    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 20")
+    update.effective_message.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=-300, message_id=777)
+    )
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(
+            side_effect=lambda **kw: SimpleNamespace(message_id=900 + kw["message_id"])
+        ),
+        copy_messages=AsyncMock(
+            side_effect=lambda **kw: [
+                SimpleNamespace(message_id=900 + mid) for mid in kw["message_ids"]
+            ]
+        ),
+    )
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+    scheduled = repositories.due_deletions(87400, 100)
+    assert set(scheduled) == {
+        (-300, 100),
+        (-300, 777),
+        (-300, 901),
+        (-300, 902),
+        (-300, 903),
+    }
+    assert repositories.due_deletions(87399, 100) == []
+
+
+def test_album_members_all_scheduled(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    for message_id in range(1, 13):
+        indexer.index(_media(message_id, "Tokyo", album="big-album"), -200)
+    deletion = MessageDeletionService(repositories, clock=lambda: 1000.0)
+    service = RetrievalService(
+        _settings(),
+        repositories,
+        deletion=deletion,
+        live_settings=LiveSettings(_settings(), repositories),
+    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 20")
+    update.effective_message.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=-300, message_id=777)
+    )
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=0)),
+        copy_messages=AsyncMock(
+            side_effect=lambda **kw: [
+                SimpleNamespace(message_id=900 + mid) for mid in kw["message_ids"]
+            ]
+        ),
+    )
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+    scheduled = repositories.due_deletions(87400, 100)
+    assert set(scheduled) == {(-300, 100), (-300, 777)} | {
+        (-300, 900 + mid) for mid in range(1, 13)
+    }
+
+
+def test_ttl_zero_schedules_nothing(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    repositories.set_runtime_setting("request_response_ttl_hours", "0")
+    deletion = MessageDeletionService(repositories, clock=lambda: 1000.0)
+    service = RetrievalService(
+        _settings(),
+        repositories,
+        deletion=deletion,
+        live_settings=LiveSettings(_settings(), repositories),
+    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 20")
+    update.effective_message.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=-300, message_id=777)
+    )
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(
+            side_effect=lambda **kw: SimpleNamespace(message_id=900 + kw["message_id"])
+        ),
+        copy_messages=AsyncMock(
+            side_effect=lambda **kw: [
+                SimpleNamespace(message_id=900 + mid) for mid in kw["message_ids"]
+            ]
+        ),
+    )
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+    assert repositories.due_deletions(87400, 100) == []
+
+
+def test_request_delete_user_message_false_skips_request_only(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    repositories.set_runtime_setting("request_delete_user_message", "false")
+    deletion = MessageDeletionService(repositories, clock=lambda: 1000.0)
+    service = RetrievalService(
+        _settings(),
+        repositories,
+        deletion=deletion,
+        live_settings=LiveSettings(_settings(), repositories),
+    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 20")
+    update.effective_message.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=-300, message_id=777)
+    )
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(
+            side_effect=lambda **kw: SimpleNamespace(message_id=900 + kw["message_id"])
+        ),
+        copy_messages=AsyncMock(
+            side_effect=lambda **kw: [
+                SimpleNamespace(message_id=900 + mid) for mid in kw["message_ids"]
+            ]
+        ),
+    )
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+    scheduled = repositories.due_deletions(87400, 100)
+    assert set(scheduled) == {(-300, 777), (-300, 901), (-300, 902), (-300, 903)}
+    assert (-300, 100) not in scheduled
+
+
+def test_deletion_none_does_not_break(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _library(repositories)
+    service = RetrievalService(_settings(), repositories)
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo\nlimit: 20")
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(
+            side_effect=lambda **kw: SimpleNamespace(message_id=900 + kw["message_id"])
+        ),
+        copy_messages=AsyncMock(
+            side_effect=lambda **kw: [
+                SimpleNamespace(message_id=900 + mid) for mid in kw["message_ids"]
+            ]
+        ),
+    )
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=bot)))
+
+
+def test_recovered_request_message_reply_text_returns_bot_send_message() -> None:
+    sentinel = object()
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=sentinel))
+    recovered = RecoveredRequestMessage(bot, -300, 50, 100)
+    assert asyncio.run(recovered.reply_text("x")) is sentinel

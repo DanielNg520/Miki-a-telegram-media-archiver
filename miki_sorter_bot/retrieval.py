@@ -17,6 +17,7 @@ from miki_sorter_bot.repositories import (
     SqliteRepositories,
     TopicRecord,
 )
+from miki_sorter_bot.message_deletion import MessageDeletionService
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
 from miki_sorter_bot.settings_registry import LiveSettings
 
@@ -89,8 +90,8 @@ class RecoveredRequestMessage:
     message_thread_id: int
     message_id: int
 
-    async def reply_text(self, text: str) -> None:
-        await self.bot.send_message(
+    async def reply_text(self, text: str) -> Any:
+        return await self.bot.send_message(
             chat_id=self.chat_id,
             message_thread_id=self.message_thread_id,
             reply_to_message_id=self.message_id,
@@ -139,7 +140,9 @@ class RetrievalService:
         repositories: SqliteRepositories,
         delivery_executor: DeliveryExecutor | None = None,
         live_settings: LiveSettings | None = None,
+        deletion: MessageDeletionService | None = None,
     ) -> None:
+        self._deletion = deletion
         self._settings = settings
         self._repositories = repositories
         self._live = live_settings or LiveSettings(settings, repositories)
@@ -147,6 +150,21 @@ class RetrievalService:
             retry_policy=RetryPolicy(),
             rate_limiter=RateLimiter(1000),
         )
+
+    def _schedule(self, chat_id: int, message_id: int) -> None:
+        if self._deletion is None:
+            return
+        self._deletion.schedule(chat_id, message_id, self._live.request_response_ttl_seconds())
+
+    async def _reply(self, message: Any, text: str) -> Any:
+        sent = await message.reply_text(text)
+        if sent is not None:
+            self._schedule(sent.chat_id, sent.message_id)
+        return sent
+
+    def _schedule_request(self, chat_id: int, message_id: int) -> None:
+        if self._live.request_delete_user_message():
+            self._schedule(chat_id, message_id)
 
     async def handle_update(
         self,
@@ -165,10 +183,10 @@ class RetrievalService:
             chat.id != self._live.effective_request_chat_id()
             or message.message_thread_id not in self._live.request_topic_ids()
         ):
-            await message.reply_text("Retrieval requests are not allowed in this topic.")
+            await self._reply(message, "Retrieval requests are not allowed in this topic.")
             return
         if user.is_bot and user.id not in self._settings.requester_bot_ids:
-            await message.reply_text("This bot is not authorized to submit retrieval requests.")
+            await self._reply(message, "This bot is not authorized to submit retrieval requests.")
             return
         try:
             request = parse_request(
@@ -178,7 +196,7 @@ class RetrievalService:
             )
             topic = self._resolve_topic(request.topic_reference)
         except RequestValidationError as error:
-            await message.reply_text(f"Invalid request: {error}\n\n{_REQUEST_EXAMPLE}")
+            await self._reply(message, f"Invalid request: {error}\n\n{_REQUEST_EXAMPLE}")
             return
         key = f"retrieve:{chat.id}:{message.message_id}"
         job = self._repositories.enqueue(
@@ -204,15 +222,16 @@ class RetrievalService:
             outcome="success",
             details={"request_message_id": message.message_id},
         )
+        self._schedule_request(chat.id, message.message_id)
         if job.status in {"completed", "cancelled"}:
             self._repositories.increment_metric("retrieval_duplicates", 1)
-            await message.reply_text(f"Request {job.id} was already {job.status}.")
+            await self._reply(message, f"Request {job.id} was already {job.status}.")
             return
         if job.status == "running":
             self._repositories.increment_metric("retrieval_duplicates", 1)
-            await message.reply_text(f"Request {job.id} is already running.")
+            await self._reply(message, f"Request {job.id} is already running.")
             return
-        await message.reply_text(f"Request {job.id} queued.")
+        await self._reply(message, f"Request {job.id} queued.")
         coroutine = self._execute(job.id, request, topic, message, chat.id, context)
         application = getattr(context, "application", None)
         if application is not None:
@@ -230,16 +249,16 @@ class RetrievalService:
         if message is None or user is None:
             return
         if user.id not in self._settings.admin_user_ids:
-            await message.reply_text("Only a configured Miki administrator can cancel requests.")
+            await self._reply(message, "Only a configured Miki administrator can cancel requests.")
             return
         parts = (message.text or "").split()
         if len(parts) != 2:
-            await message.reply_text("Usage: /request_cancel <job ID>")
+            await self._reply(message, "Usage: /request_cancel <job ID>")
             return
         try:
             job_id = int(parts[1])
         except ValueError:
-            await message.reply_text("Job ID must be an integer.")
+            await self._reply(message, "Job ID must be an integer.")
             return
         cancelled = self._repositories.cancel_job(job_id, "retrieve")
         self._repositories.add_audit_event(
@@ -250,10 +269,11 @@ class RetrievalService:
             resource_id=str(job_id),
             outcome="success" if cancelled else "denied",
         )
-        await message.reply_text(
+        await self._reply(
+            message,
             f"Request {job_id} cancellation recorded."
             if cancelled
-            else f"Request {job_id} could not be cancelled."
+            else f"Request {job_id} could not be cancelled.",
         )
 
     async def _execute(
@@ -361,7 +381,7 @@ class RetrievalService:
                 "cancelled": summary.cancelled,
             },
         )
-        await request_message.reply_text(summary.text(job_id))
+        await self._reply(request_message, summary.text(job_id))
 
     async def _reply_too_many(
         self,
@@ -375,10 +395,11 @@ class RetrievalService:
             f"{index}. {_describe_group(group)}"
             for index, group in enumerate(groups[:_RESULT_PREVIEW_LIMIT], start=1)
         ]
-        await request_message.reply_text(
+        await self._reply(
+            request_message,
             f"Request {job_id}: I found more than {request.limit} matching posts. "
             "Here are the most recent — add more keywords to narrow your search to "
-            f"{request.limit} or fewer:\n\n" + "\n".join(lines) + f"\n\n{_REQUEST_EXAMPLE}"
+            f"{request.limit} or fewer:\n\n" + "\n".join(lines) + f"\n\n{_REQUEST_EXAMPLE}",
         )
 
     async def _deliver_album(
@@ -448,6 +469,7 @@ class RetrievalService:
                 "sent",
                 destination_message_id=copied_message.message_id,
             )
+            self._schedule(destination_chat_id, copied_message.message_id)
             summary.copied += 1
         summary.albums += 1
 
@@ -544,6 +566,7 @@ class RetrievalService:
             "sent",
             destination_message_id=copied.message_id,
         )
+        self._schedule(destination_chat_id, copied.message_id)
         summary.copied += 1
 
     async def resume_job(

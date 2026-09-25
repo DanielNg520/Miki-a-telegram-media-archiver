@@ -28,7 +28,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Storage: `repositories.py`, `migrations.py`, `storage.py`. Reliability: `recovery.py`, `reliability.py`, `diagnostics.py`.
 - Notices: `periodic_notice.py`. Burner account: `burner*.py`. Serving: `main.py`, `health_server.py`, `webhook_supervisor.py`.
 - Tooling: `scripts/bench_indexing.py` (indexing benchmark, outside `make verify`).
-- Notice counter: `topic_activity.py` (album dedup, persisted rotation count). Planned: `rotation.py` (phase 5), `forward_mute.py` (phase 6).
+- Timed deletion: `message_deletion.py`. Notice counter: `topic_activity.py` (album dedup, persisted rotation count). Planned: `rotation.py` (phase 5), `forward_mute.py` (phase 6).
 
 ---
 
@@ -134,7 +134,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Tests: `tests/test_periodic_notice.py` unchanged and green, restart-survives-count, album-counts-once, stale-thread-reads-zero, notices-disabled-still-counts.
 - Handoff: `topic_activity.py` `TopicActivity` (`is_new_post`, `record`, `rotation_count`, `reset_rotation`), key `rotation_media_count`=`<thread>:<n>`. Sorting calls `record` then `notice.on_media(..., counted=)`; notice falls back to own instance. 458 tests, `make verify` green. DeepSeek defects: invented `repositories.runtime_settings`, invented import paths, fixture passed as arg (redispatched once, then hand-fixed one loop and one assertion). Sorting-level counting covered by `tests/test_topic_activity_sorting.py`. Next: phase 4.
 
-## Phase 4 — Timed message deletion queue and 24h request cleanup [ ] TODO (NEXT)
+## Phase 4 — Timed message deletion queue and 24h request cleanup [x] DONE
 - Needs: phase 0. Files: `migrations.py`, `repositories.py`, `retrieval.py`, `main.py`, `settings_registry.py`, `docs/codebase-map.md`.
 - Extends: `RetrievalService` sends, `update_retrieval_item(destination_message_id)`, the JobQueue tick pattern. New table is genuinely new.
 - Migration: `scheduled_deletions(chat_id, message_id, delete_at, PRIMARY KEY(chat_id, message_id))` plus index on `delete_at`.
@@ -156,7 +156,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Schedule the user's request message only after `enqueue` succeeds, not for wrong-topic rejects. Deleting user messages needs bot `can_delete_messages`; Forbidden is dropped and counted in metric `scheduled_deletions_failed`.
 - Schedule delivered copies right after `update_retrieval_item(..., "sent")`, two sites: album chunk loop and `_deliver_single`. A crash between copy and schedule leaks one message; accepted.
 - Tests dispatched: prompts must list exact import paths (`miki_sorter_bot.*`), and use the `database_connection` fixture directly. Past DeepSeek defects: invented paths, fixture passed as arg.
-- Handoff:
+- Handoff: `message_deletion.py` `MessageDeletionService.schedule/sweep`, `make_sweep_job` (60s, wired in `main.py`). Table `scheduled_deletions` (migration 14), repo `schedule_deletion/due_deletions/remove_deletion`. Specs `request_response_ttl_hours`, `request_delete_user_message`. `RetrievalService(deletion=)` routes replies via `_reply`, schedules copies and request message. Phase 6 notices call `deletion.schedule`. DeepSeek output clean; hand edits: imports, `__init__` param, `_reply` substitutions, `_schedule_request(chat_id, message_id)` signature, test expectations. Next: phase 5.
 
 ## Phase 5 — Topic rotation and closed-topic cleanup [ ] TODO
 - Needs: phases 3 and 4. Files: new `rotation.py`, `migrations.py`, `repositories.py`, `management.py`, `main.py`, `settings_registry.py`.

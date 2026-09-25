@@ -233,6 +233,16 @@ class RuntimeConfigRepository(Protocol):
     def remove_forwarding_pair(self, source_thread_id: int) -> bool: ...
 
 
+class ScheduledDeletionRepository(Protocol):
+    def schedule_deletion(self, chat_id: int, message_id: int, delete_at: int) -> None: ...
+
+    def due_deletions(self, now: int, limit: int) -> list[tuple[int, int]]: ...
+
+    def remove_deletion(self, chat_id: int, message_id: int) -> None: ...
+
+    def increment_metric(self, name: str, amount: int = 1) -> None: ...
+
+
 class ProcessedUpdateRepository(Protocol):
     def claim(self, update_id: int, operation: str) -> bool: ...
 
@@ -619,6 +629,29 @@ class SqliteRepositories:
                 (key,),
             )
         return cursor.rowcount > 0
+
+    def schedule_deletion(self, chat_id: int, message_id: int, delete_at: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO scheduled_deletions (chat_id, message_id, delete_at) "
+                "VALUES (?, ?, ?)",
+                (chat_id, message_id, delete_at),
+            )
+
+    def due_deletions(self, now: int, limit: int) -> list[tuple[int, int]]:
+        cursor = self._connection.execute(
+            "SELECT chat_id, message_id FROM scheduled_deletions "
+            "WHERE delete_at <= ? ORDER BY delete_at LIMIT ?",
+            (now, limit),
+        )
+        return [(row["chat_id"], row["message_id"]) for row in cursor.fetchall()]
+
+    def remove_deletion(self, chat_id: int, message_id: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                "DELETE FROM scheduled_deletions WHERE chat_id = ? AND message_id = ?",
+                (chat_id, message_id),
+            )
 
     def list_runtime_settings(self) -> dict[str, str]:
         return {

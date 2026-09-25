@@ -429,6 +429,19 @@ MIGRATIONS = (
         );
         """,
     ),
+    Migration(
+        14,
+        "scheduled_deletions",
+        """
+        CREATE TABLE scheduled_deletions (
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            delete_at INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, message_id)
+        );
+        CREATE INDEX idx_scheduled_deletions_delete_at ON scheduled_deletions(delete_at);
+        """,
+    ),
 )
 
 

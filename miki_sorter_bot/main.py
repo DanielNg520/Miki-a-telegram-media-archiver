@@ -28,6 +28,7 @@ from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.integrations import IntegrationService
 from miki_sorter_bot.instance_lock import AlreadyRunningError, InstanceLock
 from miki_sorter_bot.management import ManagementCommands
+from miki_sorter_bot.message_deletion import MessageDeletionService, make_sweep_job
 from miki_sorter_bot.periodic_notice import PeriodicNoticeService, make_tick_job
 from miki_sorter_bot.topic_activity import TopicActivity
 from miki_sorter_bot.operations import OperationsService
@@ -136,8 +137,9 @@ def _run(settings: Settings) -> None:
         notice=notice,
         activity=activity,
     )
+    deletion = MessageDeletionService(repositories)
     retrieval = RetrievalService(
-        settings, repositories, delivery_executor, live_settings=live_settings
+        settings, repositories, delivery_executor, live_settings=live_settings, deletion=deletion
     )
     recovery = JobRecoveryService(
         repositories,
@@ -249,6 +251,7 @@ def _run(settings: Settings) -> None:
     _schedule_burner_result_reporting(application, settings, repositories)
     _schedule_webhook_reconcile(application, settings, webhook_supervisor)
     _schedule_periodic_notice(application, notice)
+    _schedule_message_deletion(application, deletion)
     _schedule_lookback_sweep(application, sorting)
     _add_management_handlers(application, management)
     # group=-1 runs before routing: every inbound update proves liveness without
@@ -403,6 +406,22 @@ def _schedule_periodic_notice(
         interval=60,
         first=60,
         name="periodic-notice",
+    )
+
+
+def _schedule_message_deletion(
+    application: Application,
+    deletion: MessageDeletionService,
+) -> None:
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Message deletion requires the JobQueue, which is unavailable.")
+        return
+    job_queue.run_repeating(
+        make_sweep_job(deletion),
+        interval=60,
+        first=60,
+        name="message-deletion",
     )
 
 

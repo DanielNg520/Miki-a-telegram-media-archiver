@@ -368,6 +368,23 @@ def default_registry() -> SettingsRegistry:
                 lambda s: frozenset({int(getattr(s, "source_thread_id", 0))}) - {0},
             ),
             SettingSpec(
+                "request_response_ttl_hours",
+                "requests",
+                "Hours after which Miki's request replies, delivered media and the "
+                "requester's request message are auto-deleted. 0 disables.",
+                bounded_int(0, 720),
+                render_number,
+                lambda s: int(getattr(s, "request_response_ttl_hours", 24)),
+            ),
+            SettingSpec(
+                "request_delete_user_message",
+                "requests",
+                "Whether the requester's own #request message is also deleted at that time.",
+                parse_bool,
+                render_bool,
+                lambda s: bool(getattr(s, "request_delete_user_message", True)),
+            ),
+            SettingSpec(
                 "media_backup_chat_id",
                 "backup",
                 "Destination group chat id for media backups.",
@@ -457,6 +474,12 @@ class LiveSettings:
 
     def effective_request_chat_id(self) -> int:
         return int(self.get("request_chat_id"))
+
+    def request_response_ttl_seconds(self) -> int:
+        return int(self.get("request_response_ttl_hours")) * 3600
+
+    def request_delete_user_message(self) -> bool:
+        return bool(self.get("request_delete_user_message"))
 
     def notice_enabled(self) -> bool:
         return bool(self.get("periodic_notice_enabled"))
