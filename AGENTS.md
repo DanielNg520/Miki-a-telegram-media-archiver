@@ -147,6 +147,15 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - The sweep removes rows even when deletion fails (already gone) so nothing retries forever. Failures counted as a metric.
 - Phase 6 notices reuse `schedule_deletion`; expose it as the public API of the deletion service.
 - Tests: survives restart, deleted once, TTL 0 schedules nothing, album members all scheduled, recovered request replies scheduled.
+- Audit 2026-09-25 (binding, supersedes conflicting bullets above):
+- Reuse check: `jobs` table does not fit (recovery dispatches by kind, no due-time index, one row per message). New table justified. Reuse `classify_error` (`reliability.py`) in the sweep.
+- Sweep failure rule: drop the row when `Failure.retryable` is False (Forbidden, BadRequest, unexpected). Keep it on retryable errors; stop the sweep on RetryAfter. Cap 50 rows per tick. Supersedes "removes rows even when deletion fails".
+- Public API: `schedule(chat_id, message_id, delay_seconds)`. `INSERT OR IGNORE` so replays and recovery never push a deadline out. `delete_at` is an epoch integer, migration 14.
+- Service lives in new `message_deletion.py`; `RetrievalService` takes optional `deletion` (None in existing tests, no scheduling) and computes the delay from the TTL setting; 0 skips.
+- Reply sites to route through one helper: `handle_update` (7), `cancel` (4), `_execute` summary, `_reply_too_many`, `RecoveredRequestMessage.reply_text` (return the sent message).
+- Schedule the user's request message only after `enqueue` succeeds, not for wrong-topic rejects. Deleting user messages needs bot `can_delete_messages`; Forbidden is dropped and counted in metric `scheduled_deletions_failed`.
+- Schedule delivered copies right after `update_retrieval_item(..., "sent")`, two sites: album chunk loop and `_deliver_single`. A crash between copy and schedule leaks one message; accepted.
+- Tests dispatched: prompts must list exact import paths (`miki_sorter_bot.*`), and use the `database_connection` fixture directly. Past DeepSeek defects: invented paths, fixture passed as arg.
 - Handoff:
 
 ## Phase 5 — Topic rotation and closed-topic cleanup [ ] TODO
