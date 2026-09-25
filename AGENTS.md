@@ -99,7 +99,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Tests are dispatched too; hand edits are limited to wiring, imports, types, and one-token test fixes, and are reported to the user.
 - Dispatch prompts state behaviour, not code. Audit every reply: past defects were UTF-16 offsets, wrong chat id, wrong-member bookkeeping.
 
-## Phase 2 — Index/database build optimization [ ] TODO (NEXT)
+## Phase 2 — Index/database build optimization [x] DONE
 - Needs: phase 0. Files: `indexing.py`, `repositories.py`, `storage.py`, `burner_backfill.py`, new benchmark script.
 - Extends: `MessageIndexer.index`, `SqliteRepositories.upsert_post`, `Storage.open`. Nothing new to build except the benchmark.
 - Step 1: benchmark 20k synthetic posts through `MessageIndexer.index`; record before numbers here. Keep only if it stays useful.
@@ -115,10 +115,11 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Step 1 DONE: `scripts/bench_indexing.py` (TriAPI DeepSeek, 3 rounds: audits caught non-media messages, invented private attribute). Run `TMPDIR=~/.cache/bench python scripts/bench_indexing.py --posts 20000 --mappings 50 --reindex`. `/tmp` is tmpfs; hides fsync cost.
 - BEFORE (20k posts, btrfs): 0 mappings 348 posts/s first, 352 reindex. 50 mappings 328 / 329. `list_mappings` called once per post (20000). Cost is per-post commit plus fsync.
 - Step 2 DONE: `MessageIndexer(cache_mappings=True)` (opt-in, burner crawls only; instance lifetime is the invalidation, no invalidate method). 328 to 347 posts/s (+6%), `list_mappings` calls 20000 to 1. Bench flag `--cache-mappings`.
-- Next: bulk `_tx()` batching against the numbers above; the big cost is per-post commit plus fsync.
-- Handoff:
+- Step 3 DONE: `PRAGMA synchronous=NORMAL` in `Storage.open` (main connection only): 347 to 5294 posts/s (~15x). Bulk `transaction()` reached 26k posts/s (batch 100) but was reverted: unused code, and burner batching needs buffering so no write lock spans Telegram waits.
+- Not pursued (unmeasured, plan says drop): `get_post` re-read, token-set skip, `PRAGMA optimize`, `min_id` checkpoint.
+- Handoff: commits e0eea02 (benchmark), 42ac7a2 (mapping cache), then the pragma commit. 442 tests, `make verify` green. Benchmark is `scripts/bench_indexing.py`. Phase 3 can use it for write cost: ~5300 posts/s means one persisted counter row per post is cheap. Optional follow-up: burner batch flush (26k posts/s). Next: phase 3.
 
-## Phase 3 — Shared persisted media counter [ ] TODO
+## Phase 3 — Shared persisted media counter [ ] TODO (NEXT)
 - Needs: phase 2 (benchmark for write cost). Files: new `topic_activity.py`, `periodic_notice.py`, `sorting.py`, `settings_registry.py`.
 - Extends: the count and album-dedup logic already in `PeriodicNoticeService.on_media`. Move it, do not copy it.
 - `TopicActivity.record(topic_id, group_id) -> bool` returns whether this post counted. It owns the shared album dedup window.

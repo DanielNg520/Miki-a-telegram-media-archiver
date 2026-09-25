@@ -22,6 +22,7 @@ class Storage:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA synchronous = NORMAL")
             migrate(connection)
             self._connection = connection
         return SqliteRepositories(self._connection)
