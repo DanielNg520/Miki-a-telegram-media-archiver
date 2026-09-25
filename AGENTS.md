@@ -73,7 +73,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Done when: `git diff --stat` is small and `uv run pytest -q` is green.
 - Handoff: commits 76556ea (windows/ purge, .codegraph ignore), LF normalization + `.gitattributes`, then pending edits. `git diff` clean, 421 tests green. Next: phase 1.
 
-## Phase 1 — Backup hardening and sender removal [ ] TODO
+## Phase 1 — Backup hardening and sender removal [x] DONE
 - Needs: phase 0. Files: `sorting.py`, `settings_registry.py`, `indexing.py`, `tests/test_sorting.py`.
 - Match hashtags as whole tags (`#java`, `#javascript` must not match `#jav`); import the single `HASHTAG_RE` from `indexing.py`.
 - Move backup chat id, tag-to-topic map into registry specs; remove hardcoded values and trailing whitespace.
@@ -82,7 +82,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Sender removal: strip @mentions and links (also text_link/mention entities) from captions before backup; keep `#JAV`/`#Asian` tags matched on the original text.
 - Verify the copied post carries no "forwarded from" header. Remove duplicate `_effective_source_thread_id` in favour of `LiveSettings`.
 - Tests: tag precedence, substring false positives, album, dedupe, failure swallowed, no sender/@mention in backup.
-- Handoff:
+- Handoff: specs `media_backup_chat_id`, `media_backup_tag_topics` (`jav:2,asian:3`, ordered). Sorting: `_strip_sender_identifiers`, `_copy_one_to_backup`, in-RAM `_backed_up` dedupe (5000), metric `media_backup_failures`, album backup inside `_album_send_gate`. `_effective_source_thread_id` removed; use `_live`. 439 tests green. Phase 1 code came from TriAPI DeepSeek dispatch (4 audit rounds): audits caught UTF-16 offsets, wrong chat id, wrong-member dedupe. Next: phase 2 or 3 or 4.
 
 ## Phase 2 — Index/database build optimization [ ] TODO
 - Needs: phase 0. Files: `indexing.py`, `repositories.py`, `storage.py`, `burner_backfill.py`, new benchmark script.

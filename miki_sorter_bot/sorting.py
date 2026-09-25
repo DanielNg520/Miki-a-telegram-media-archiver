@@ -22,6 +22,7 @@ from telegram.ext import ContextTypes
 
 from miki_sorter_bot.config import Settings, TopicForwardingPair
 from miki_sorter_bot.indexing import (
+    HASHTAG_RE,
     IndexingService,
     contains_keyword,
     contains_phrase,
@@ -34,7 +35,6 @@ from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPoli
 from miki_sorter_bot.settings_registry import LiveSettings
 
 LOGGER = logging.getLogger(__name__)
-HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
 ALBUM_VISUAL_MEDIA_TYPES = {"photo", "video"}
 ALBUM_HOMOGENEOUS_MEDIA_TYPES = {"audio", "document"}
 # How many album uploads may be in flight at once across all pending albums.
@@ -129,6 +129,7 @@ class SortingService:
         self._live = live_settings or LiveSettings(settings, repositories)
         self._matcher = RouteMatcher(repositories, settings.archive_chat_id)
         self._album_decisions: OrderedDict[tuple[int, str], SortDecision] = OrderedDict()
+        self._backed_up: OrderedDict[tuple[int, int], None] = OrderedDict()
         self._album_source_threads: OrderedDict[tuple[int, str], int] = OrderedDict()
         self._pending_albums: dict[tuple[int, str], PendingAlbum] = {}
         self._album_flush_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
@@ -160,24 +161,6 @@ class SortingService:
         # the DB is the live source of truth and pairs become manageable via
         # Telegram without a restart.
         self._repositories.seed_forwarding_pairs(getattr(settings, "topic_forwarding_pairs", ()))
-
-    def _effective_source_thread_id(self) -> int:
-        """The topic Miki listens to: a runtime override if set, else the env value.
-
-        Read live from the database so ``/source_set`` takes effect without a
-        restart, mirroring how route mappings are resolved per message.
-        """
-
-        override = self._repositories.get_runtime_setting("source_thread_id")
-        if override is not None:
-            try:
-                return int(override)
-            except ValueError:
-                LOGGER.warning(
-                    "Ignoring invalid runtime source_thread_id override",
-                    extra={"value": override},
-                )
-        return self._settings.source_thread_id
 
     def _forwarding_pair(
         self,
@@ -396,7 +379,7 @@ class SortingService:
         forwarding_pair = self._forwarding_pair(chat.id, source_thread_id)
         is_primary_source = (
             chat.id == self._settings.source_chat_id
-            and source_thread_id == self._effective_source_thread_id()
+            and source_thread_id == self._live.effective_source_thread_id()
         )
         if forwarding_pair is None and not is_primary_source:
             return
@@ -483,7 +466,7 @@ class SortingService:
         # uncaptioned media immediately, so nothing is ever buffered for them).
         is_primary_source = (
             chat.id == self._settings.source_chat_id
-            and source_thread_id == self._effective_source_thread_id()
+            and source_thread_id == self._live.effective_source_thread_id()
         )
         if not is_primary_source:
             return
@@ -791,12 +774,11 @@ class SortingService:
         """Deliver an assembled, decided album as a group, with a per-member
         fallback. Shared by the album flush path and look-back delivery."""
 
-        await self._backup_to_second_group(messages, context)
-
         # The gate spans the fallback loop too: an album that falls back to
         # per-member copies is exactly the case that must not compete for
         # bandwidth with the next album's grouped upload.
         async with self._album_send_gate:
+            await self._backup_to_second_group(messages, context)
             if len(messages) == 1:
                 await self._deliver(messages[0], source_chat_id, decision, context)
                 return
@@ -1280,39 +1262,106 @@ class SortingService:
             details=details,
         )
 
-    async def _backup_to_second_group(
+    async def _copy_one_to_backup(
         self,
-        messages: tuple[Any, ...],
+        message: Any,
         context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        text = _album_text(messages).lower()
-        topic_id = None
-        if "#jav" in text:
-            topic_id = 2
-        elif "#asian" in text:
-            topic_id = 3
-        
-        if topic_id is None:
-            return
-
-        backup_chat_id = -1004365154840
+        chat_id: int,
+        topic_id: int,
+    ) -> bool:
         try:
-            if len(messages) == 1:
-                await context.bot.copy_message(
-                    chat_id=backup_chat_id,
-                    message_thread_id=topic_id,
-                    from_chat_id=messages[0].chat_id,
-                    message_id=messages[0].message_id,
+            kwargs: dict[str, Any] = {
+                "chat_id": chat_id,
+                "message_thread_id": topic_id,
+                "from_chat_id": message.chat_id,
+                "message_id": message.message_id,
+            }
+            if message.caption is not None:
+                kwargs["caption"] = _strip_sender_identifiers(
+                    message.caption, message.caption_entities
                 )
-            else:
-                await context.bot.copy_messages(
-                    chat_id=backup_chat_id,
-                    message_thread_id=topic_id,
-                    from_chat_id=messages[0].chat_id,
-                    message_ids=[m.message_id for m in messages],
-                )
+            await context.bot.copy_message(**kwargs)
+            return True
         except Exception as error:
-            LOGGER.error("Failed to backup media to second group", exc_info=error)
+            LOGGER.warning("Backup copy failed (%s): %s", classify_error(error).category, error)
+            return False
+
+    async def _backup_to_second_group(
+        self, messages: tuple[Any, ...], context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        try:
+            album_text = _album_text(messages)
+            hashtags = {match.group(1).casefold() for match in HASHTAG_RE.finditer(album_text)}
+            if not hashtags:
+                return
+
+            destination_topic = None
+            for tag, topic_id in self._live.media_backup_tag_topics():
+                if tag.casefold() in hashtags:
+                    destination_topic = topic_id
+                    break
+            if destination_topic is None:
+                return
+
+            pending = [
+                msg for msg in messages if (msg.chat_id, msg.message_id) not in self._backed_up
+            ]
+            if not pending:
+                return
+
+            backup_chat_id = self._live.media_backup_chat_id()
+            backed_up_count = 0
+
+            if len(pending) == 1:
+                if await self._copy_one_to_backup(
+                    pending[0], context, backup_chat_id, destination_topic
+                ):
+                    self._backed_up[(pending[0].chat_id, pending[0].message_id)] = None
+                    backed_up_count = 1
+            else:
+                captions = tuple(
+                    _strip_sender_identifiers(msg.caption or "", msg.caption_entities) or None
+                    for msg in pending
+                )
+                payload = _media_group_payload(tuple(pending), captions=captions)
+                if payload is not None:
+                    try:
+                        sent = await context.bot.send_media_group(
+                            chat_id=backup_chat_id,
+                            message_thread_id=destination_topic,
+                            media=payload,
+                        )
+                        sent_count = len(sent)
+                        for msg in pending[:sent_count]:
+                            self._backed_up[(msg.chat_id, msg.message_id)] = None
+                        backed_up_count = sent_count
+                    except Exception as e:
+                        LOGGER.warning(
+                            "send_media_group failed in _backup_to_second_group: %s",
+                            classify_error(e).category,
+                        )
+                        for msg in pending:
+                            if await self._copy_one_to_backup(
+                                msg, context, backup_chat_id, destination_topic
+                            ):
+                                self._backed_up[(msg.chat_id, msg.message_id)] = None
+                                backed_up_count += 1
+                else:
+                    for msg in pending:
+                        if await self._copy_one_to_backup(
+                            msg, context, backup_chat_id, destination_topic
+                        ):
+                            self._backed_up[(msg.chat_id, msg.message_id)] = None
+                            backed_up_count += 1
+
+            while len(self._backed_up) > 5000:
+                self._backed_up.popitem(last=False)
+
+            failed_count = len(pending) - backed_up_count
+            if failed_count > 0:
+                self._repositories.increment_metric("media_backup_failures", failed_count)
+        except Exception:
+            LOGGER.warning("Unexpected error in _backup_to_second_group", exc_info=True)
 
 
 def _matching_routes(
@@ -1346,6 +1395,67 @@ def _matching_non_hashtags(
     ]
 
 
+_AT_MENTION_RE = re.compile(r"(?<!\w)@\w{5,32}")
+_URL_RE = re.compile(r"(?:https?://|t\.me/)\S+")
+
+
+def _strip_sender_identifiers(text: str, entities: tuple[Any, ...] | None) -> str:
+    if not text:
+        return ""
+
+    utf16 = text.encode("utf-16-le")
+    removal_ranges = []
+
+    if entities:
+        for ent in entities:
+            etype = getattr(ent, "type", "")
+            if etype not in ("mention", "text_mention", "url", "text_link", "email"):
+                continue
+            offset = getattr(ent, "offset", 0)
+            length = getattr(ent, "length", 0)
+            if length <= 0:
+                continue
+            start_u16 = max(0, offset * 2)
+            end_u16 = min(len(utf16), (offset + length) * 2)
+            if start_u16 >= end_u16:
+                continue
+            removal_ranges.append((start_u16, end_u16))
+
+    if removal_ranges:
+        removal_ranges.sort()
+        merged: list[tuple[int, int]] = []
+        for start, end in removal_ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+        chunks = []
+        pos = 0
+        for start, end in merged:
+            if start > pos:
+                chunks.append(utf16[pos:start])
+            pos = end
+        if pos < len(utf16):
+            chunks.append(utf16[pos:])
+        text = b"".join(chunks).decode("utf-16-le")
+
+    text = _AT_MENTION_RE.sub("", text)
+    text = _URL_RE.sub("", text)
+
+    lines = []
+    for line in text.split("\n"):
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        lines.append(line)
+
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+
+    return "\n".join(lines)
+
+
 def _album_text(messages: tuple[Any, ...]) -> str:
     return "\n".join(text for message in messages if (text := _message_text(message)))
 
@@ -1360,6 +1470,7 @@ def _message_text(message: Any) -> str:
 
 def _media_group_payload(
     messages: tuple[Any, ...],
+    captions: tuple[str | None, ...] | None = None,
 ) -> tuple[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio, ...] | None:
     media_types = tuple(media_type(message) for message in messages)
     if any(kind is None for kind in media_types):
@@ -1372,44 +1483,37 @@ def _media_group_payload(
     ):
         return None
 
+    if captions is not None and len(captions) != len(messages):
+        return None
+
     payload: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio] = []
-    for message, kind in zip(messages, media_types):
+    for i, (message, kind) in enumerate(zip(messages, media_types)):
         media_id = _album_file_id(message, kind)
         if media_id is None:
             return None
-        caption = (getattr(message, "caption", None) or "").strip() or None
-        caption_entities = getattr(message, "caption_entities", None)
+        caption = (
+            captions[i]
+            if captions is not None
+            else (getattr(message, "caption", None) or "").strip() or None
+        )
+        caption_entities = (
+            None if captions is not None else getattr(message, "caption_entities", None)
+        )
         if kind == "photo":
             payload.append(
-                InputMediaPhoto(
-                    media_id,
-                    caption=caption,
-                    caption_entities=caption_entities,
-                )
+                InputMediaPhoto(media_id, caption=caption, caption_entities=caption_entities)
             )
         elif kind == "video":
             payload.append(
-                InputMediaVideo(
-                    media_id,
-                    caption=caption,
-                    caption_entities=caption_entities,
-                )
+                InputMediaVideo(media_id, caption=caption, caption_entities=caption_entities)
             )
         elif kind == "document":
             payload.append(
-                InputMediaDocument(
-                    media_id,
-                    caption=caption,
-                    caption_entities=caption_entities,
-                )
+                InputMediaDocument(media_id, caption=caption, caption_entities=caption_entities)
             )
         elif kind == "audio":
             payload.append(
-                InputMediaAudio(
-                    media_id,
-                    caption=caption,
-                    caption_entities=caption_entities,
-                )
+                InputMediaAudio(media_id, caption=caption, caption_entities=caption_entities)
             )
         else:
             return None

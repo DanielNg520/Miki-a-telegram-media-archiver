@@ -148,9 +148,9 @@ def test_sorter_uses_runtime_source_thread_override(database_connection) -> None
     )
     sorting = SortingService(settings, repositories, indexing=SimpleNamespace())
 
-    assert sorting._effective_source_thread_id() == 5
+    assert sorting._live.effective_source_thread_id() == 5
     repositories.set_runtime_setting("source_thread_id", "77", 10)
-    assert sorting._effective_source_thread_id() == 77  # no restart needed
+    assert sorting._live.effective_source_thread_id() == 77  # no restart needed
 
 
 def test_sorter_reads_forwarding_pair_from_database(database_connection) -> None:

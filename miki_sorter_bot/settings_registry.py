@@ -111,6 +111,41 @@ def render_int_set(value: Iterable[int]) -> str:
     return ", ".join(str(item) for item in sorted(value))
 
 
+def parse_tag_topic_pairs(raw: str) -> tuple[tuple[str, int], ...]:
+    """Parse a comma-separated list of tag:topic pairs into an ordered tuple."""
+    text = raw.strip()
+    if not text:
+        return ()
+    pairs = []
+    seen_tags = set()
+    for part in text.split(","):
+        piece = part.strip()
+        if not piece:
+            raise ValueError("empty pair in tag:topic list")
+        if ":" not in piece:
+            raise ValueError("expected tag:topic pair")
+        tag, _, topic = piece.partition(":")
+        tag = tag.strip().lstrip("#").lower()
+        topic = topic.strip()
+        if not tag:
+            raise ValueError("empty tag in tag:topic pair")
+        if tag in seen_tags:
+            raise ValueError(f"duplicate tag {tag!r}")
+        try:
+            topic_id = int(topic)
+        except ValueError as error:
+            raise ValueError("topic id must be a whole number") from error
+        if topic_id <= 0:
+            raise ValueError("topic id must be positive")
+        seen_tags.add(tag)
+        pairs.append((tag, topic_id))
+    return tuple(pairs)
+
+
+def render_tag_topic_pairs(value: tuple[tuple[str, int], ...]) -> str:
+    return ",".join(f"{tag}:{topic_id}" for tag, topic_id in value)
+
+
 @dataclass(frozen=True, slots=True)
 class SettingSpec:
     key: str
@@ -332,6 +367,24 @@ def default_registry() -> SettingsRegistry:
                 render_int_set,
                 lambda s: frozenset({int(getattr(s, "source_thread_id", 0))}) - {0},
             ),
+            SettingSpec(
+                "media_backup_chat_id",
+                "backup",
+                "Destination group chat id for media backups.",
+                parse_int,
+                str,
+                lambda s: int(getattr(s, "media_backup_chat_id", -1004365154840)),
+            ),
+            SettingSpec(
+                "media_backup_tag_topics",
+                "backup",
+                "Ordered mapping of hashtag to topic id in the backup group, comma-separated tag:topic pairs.",
+                parse_tag_topic_pairs,
+                render_tag_topic_pairs,
+                lambda s: parse_tag_topic_pairs(
+                    getattr(s, "media_backup_tag_topics", "jav:2,asian:3")
+                ),
+            ),
         ]
     )
 
@@ -390,6 +443,12 @@ class LiveSettings:
     def default_topic_id(self) -> int:
         return int(self.get("default_topic_id"))
 
+    def media_backup_chat_id(self) -> int:
+        return int(self.get("media_backup_chat_id"))
+
+    def media_backup_tag_topics(self) -> tuple[tuple[str, int], ...]:
+        return self.get("media_backup_tag_topics")
+
     def sort_dry_run(self) -> bool:
         return bool(self.get("sort_dry_run"))
 
@@ -411,8 +470,7 @@ class LiveSettings:
     def effective_source_thread_id(self) -> int:
         """The source topic in force: a runtime override if set, else the env value.
 
-        Mirrors ``Sorting._effective_source_thread_id`` so callers here resolve
-        the same topic Miki actually listens to after a live ``/source_set``.
+        Resolves the topic Miki actually listens to after a live ``/source_set``.
         """
         override = self._store.get_runtime_setting("source_thread_id")
         if override is not None:
