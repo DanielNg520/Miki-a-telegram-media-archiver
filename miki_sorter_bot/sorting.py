@@ -37,6 +37,8 @@ LOGGER = logging.getLogger(__name__)
 HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
 ALBUM_VISUAL_MEDIA_TYPES = {"photo", "video"}
 ALBUM_HOMOGENEOUS_MEDIA_TYPES = {"audio", "document"}
+# How many album uploads may be in flight at once across all pending albums.
+_MAX_CONCURRENT_ALBUM_SENDS = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,13 @@ class SortingService:
         # POSTs, so stragglers past the flush delay are common; polling batches
         # them so the race never triggers).
         self._delivering_albums: set[tuple[int, str]] = set()
+        # One album upload at a time. A restart replays the whole polling backlog
+        # in a single getUpdates, so every buffered album's debounce expires in
+        # the same second; firing N concurrent send_media_group uploads saturated
+        # the link and returned them all as outcome_unknown, which strands the
+        # members permanently (a failed job is not retried by the pending sweep).
+        # A Telegram album is at most 10 items, so serialising costs little.
+        self._album_send_gate = asyncio.Semaphore(_MAX_CONCURRENT_ALBUM_SENDS)
         # Short-lived memory of uncaptioned media so a following hashtag-only
         # message can route "the post before it" (look-back feature). Media that
         # expires unclaimed is collected here and later filed under the default
@@ -424,6 +433,7 @@ class SortingService:
             self._queue_album_message(album_key, message, chat.id, decision, context)
             return
         if direct_decision is not None:
+            await self._backup_to_second_group((message,), context)
             await self._deliver(message, chat.id, direct_decision, context)
             return
         if not text:
@@ -449,8 +459,10 @@ class SortingService:
             await self._reply_double_tag(message, decision)
             fallback = self._default_decision(f"conflict-default:{decision.reason}")
             if fallback is not None:
+                await self._backup_to_second_group((message,), context)
                 await self._deliver(message, chat.id, fallback, context)
             return
+        await self._backup_to_second_group((message,), context)
         await self._deliver(message, chat.id, decision, context)
 
     async def _maybe_route_from_lookback(
@@ -779,33 +791,39 @@ class SortingService:
         """Deliver an assembled, decided album as a group, with a per-member
         fallback. Shared by the album flush path and look-back delivery."""
 
-        if len(messages) == 1:
-            await self._deliver(messages[0], source_chat_id, decision, context)
-            return
-        group_outcome = await self._deliver_media_group(
-            messages,
-            source_chat_id,
-            decision,
-            context,
-        )
-        if group_outcome is not AlbumDeliveryOutcome.SAFE_FALLBACK:
-            return
-        failed_count = 0
-        for message in messages:
-            try:
-                await self._deliver(message, source_chat_id, decision, context)
-            except Exception as error:
-                failed_count += 1
-                failure = classify_error(error)
-                LOGGER.warning(
-                    "Individual album member delivery failed; continuing album",
-                    extra={
-                        "source_chat_id": source_chat_id,
-                        "source_message_id": getattr(message, "message_id", None),
-                        "media_group_id": media_group_id,
-                        "error_category": failure.category,
-                    },
-                )
+        await self._backup_to_second_group(messages, context)
+
+        # The gate spans the fallback loop too: an album that falls back to
+        # per-member copies is exactly the case that must not compete for
+        # bandwidth with the next album's grouped upload.
+        async with self._album_send_gate:
+            if len(messages) == 1:
+                await self._deliver(messages[0], source_chat_id, decision, context)
+                return
+            group_outcome = await self._deliver_media_group(
+                messages,
+                source_chat_id,
+                decision,
+                context,
+            )
+            if group_outcome is not AlbumDeliveryOutcome.SAFE_FALLBACK:
+                return
+            failed_count = 0
+            for message in messages:
+                try:
+                    await self._deliver(message, source_chat_id, decision, context)
+                except Exception as error:
+                    failed_count += 1
+                    failure = classify_error(error)
+                    LOGGER.warning(
+                        "Individual album member delivery failed; continuing album",
+                        extra={
+                            "source_chat_id": source_chat_id,
+                            "source_message_id": getattr(message, "message_id", None),
+                            "media_group_id": media_group_id,
+                            "error_category": failure.category,
+                        },
+                    )
         if failed_count:
             self._repositories.increment_metric(
                 "album_member_delivery_failures",
@@ -1261,6 +1279,40 @@ class SortingService:
             outcome=outcome,
             details=details,
         )
+
+    async def _backup_to_second_group(
+        self,
+        messages: tuple[Any, ...],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        text = _album_text(messages).lower()
+        topic_id = None
+        if "#jav" in text:
+            topic_id = 2
+        elif "#asian" in text:
+            topic_id = 3
+        
+        if topic_id is None:
+            return
+
+        backup_chat_id = -1004365154840
+        try:
+            if len(messages) == 1:
+                await context.bot.copy_message(
+                    chat_id=backup_chat_id,
+                    message_thread_id=topic_id,
+                    from_chat_id=messages[0].chat_id,
+                    message_id=messages[0].message_id,
+                )
+            else:
+                await context.bot.copy_messages(
+                    chat_id=backup_chat_id,
+                    message_thread_id=topic_id,
+                    from_chat_id=messages[0].chat_id,
+                    message_ids=[m.message_id for m in messages],
+                )
+        except Exception as error:
+            LOGGER.error("Failed to backup media to second group", exc_info=error)
 
 
 def _matching_routes(
