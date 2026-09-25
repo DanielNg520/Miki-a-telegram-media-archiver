@@ -719,3 +719,66 @@ def test_recovered_request_message_reply_text_returns_bot_send_message() -> None
     bot = SimpleNamespace(send_message=AsyncMock(return_value=sentinel))
     recovered = RecoveredRequestMessage(bot, -300, 50, 100)
     assert asyncio.run(recovered.reply_text("x")) is sentinel
+
+
+def _deletion_service(repositories, **kwargs):
+    deletion = MessageDeletionService(repositories, clock=lambda: 1000.0)
+    return deletion, RetrievalService(
+        _settings(),
+        repositories,
+        deletion=deletion,
+        live_settings=LiveSettings(_settings(), repositories),
+        **kwargs,
+    )
+
+
+def test_cancel_reply_is_scheduled(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _, service = _deletion_service(repositories)
+    job = repositories.enqueue("retrieve", "retrieve:test", {})
+    update = _request_update("/request_cancel " + str(job.id), user_id=1)
+    update.effective_message.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=-300, message_id=778)
+    )
+
+    asyncio.run(service.cancel(update, SimpleNamespace()))
+
+    assert repositories.due_deletions(87400, 100) == [(-300, 778)]
+
+
+def test_overflow_prompt_reply_is_scheduled(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "keyword", "Tokyo", 1)
+    indexer = MessageIndexer(repositories, bot_id=99)
+    for message_id in range(1, 16):
+        indexer.index(_media(message_id, f"Tokyo shot {message_id}"), -200)
+    deletion = MessageDeletionService(repositories, clock=lambda: 1000.0)
+    settings = _settings(default_request_limit=10)
+    service = RetrievalService(
+        settings,
+        repositories,
+        deletion=deletion,
+        live_settings=LiveSettings(settings, repositories),
+    )
+    update = _request_update("#request\ntopic: Japan\nkeywords: Tokyo")
+    update.effective_message.reply_text = AsyncMock(
+        return_value=SimpleNamespace(chat_id=-300, message_id=779)
+    )
+
+    asyncio.run(service.handle_update(update, SimpleNamespace(bot=SimpleNamespace())))
+
+    assert (-300, 779) in repositories.due_deletions(87400, 100)
+
+
+def test_scheduling_failure_does_not_break_reply(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    deletion = SimpleNamespace(schedule=lambda *args: 1 / 0)
+    service = RetrievalService(_settings(), repositories, deletion=deletion)
+    message = SimpleNamespace(
+        reply_text=AsyncMock(return_value=SimpleNamespace(chat_id=-300, message_id=1))
+    )
+
+    sent = asyncio.run(service._reply(message, "hi"))
+
+    assert sent.message_id == 1

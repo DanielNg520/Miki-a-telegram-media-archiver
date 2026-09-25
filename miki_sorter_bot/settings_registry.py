@@ -371,8 +371,9 @@ def default_registry() -> SettingsRegistry:
                 "request_response_ttl_hours",
                 "requests",
                 "Hours after which Miki's request replies, delivered media and the "
-                "requester's request message are auto-deleted. 0 disables.",
-                bounded_int(0, 720),
+                "requester's request message are auto-deleted. 0 disables. Max 48: Telegram "
+                "does not let bots delete other members' messages after 48 hours.",
+                bounded_int(0, 48),
                 render_number,
                 lambda s: int(getattr(s, "request_response_ttl_hours", 24)),
             ),

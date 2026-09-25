@@ -8,6 +8,7 @@ from miki_sorter_bot.main import (
     _handle_error,
     _non_ok_summary,
     _schedule_job_recovery,
+    _schedule_message_deletion,
     _schedule_sanity_checks,
     _send_startup_checkin,
     _run_application,
@@ -203,3 +204,13 @@ def test_job_recovery_worker_is_scheduled() -> None:
         "first": 45,
         "name": "job-recovery",
     }
+
+
+def test_message_deletion_sweep_is_scheduled() -> None:
+    job_queue = SimpleNamespace(run_repeating=Mock())
+    application = SimpleNamespace(job_queue=job_queue)
+
+    _schedule_message_deletion(application, SimpleNamespace(sweep=AsyncMock()))
+
+    assert job_queue.run_repeating.call_args.kwargs["name"] == "message-deletion"
+    assert job_queue.run_repeating.call_args.kwargs["interval"] == 60

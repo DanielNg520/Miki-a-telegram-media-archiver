@@ -154,3 +154,16 @@ def test_make_sweep_job_runs_sweep(database_connection):
     asyncio.run(job(context))
 
     context.bot.delete_message.assert_awaited_once_with(chat_id=19, message_id=29)
+
+
+def test_retryable_failure_is_pushed_back_not_blocking(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    service = MessageDeletionService(repositories, clock=lambda: 1300)
+    repositories.schedule_deletion(15, 25, 1000)
+    context = SimpleNamespace(
+        bot=SimpleNamespace(delete_message=AsyncMock(side_effect=NetworkError("x")))
+    )
+    asyncio.run(service.sweep(context))
+
+    assert repositories.due_deletions(1300, 10) == []
+    assert repositories.due_deletions(1600, 10) == [(15, 25)]

@@ -11,6 +11,8 @@ from miki_sorter_bot.logging_config import reset_correlation_id, set_correlation
 from miki_sorter_bot.reliability import classify_error
 from miki_sorter_bot.repositories import ScheduledDeletionRepository
 
+RETRY_DELAY_SECONDS = 300
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -48,8 +50,13 @@ class MessageDeletionService:
                 failure = classify_error(error)
                 if failure.retry_after is not None:
                     return
-                if not failure.retryable:
-                    self._repositories.remove_deletion(chat_id, message_id)
+                self._repositories.remove_deletion(chat_id, message_id)
+                if failure.retryable:
+                    # Re-queue behind the rest so a stuck row cannot block the batch.
+                    self._repositories.schedule_deletion(
+                        chat_id, message_id, int(self._clock()) + RETRY_DELAY_SECONDS
+                    )
+                else:
                     self._repositories.increment_metric("scheduled_deletions_failed")
                 continue
             self._repositories.remove_deletion(chat_id, message_id)

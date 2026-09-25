@@ -110,10 +110,11 @@ class MessageIndexer:
         text = (getattr(message, "caption", None) or getattr(message, "text", None) or "").strip()
         if not self._cache_mappings or chat_id not in self._mappings_cache:
             mappings = self._repositories.list_mappings(chat_id)
-            self._mappings_cache[chat_id] = {
-                (item.kind, item.normalized_value) for item in mappings
-            }
-        configured_values = self._mappings_cache[chat_id]
+            configured_values = {(item.kind, item.normalized_value) for item in mappings}
+            if self._cache_mappings:
+                self._mappings_cache[chat_id] = configured_values
+        else:
+            configured_values = self._mappings_cache[chat_id]
         extraction = extract_search_tokens(text, configured_values)
         sender = getattr(message, "from_user", None)
         sender_id = getattr(sender, "id", None)

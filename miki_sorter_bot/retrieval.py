@@ -154,7 +154,13 @@ class RetrievalService:
     def _schedule(self, chat_id: int, message_id: int) -> None:
         if self._deletion is None:
             return
-        self._deletion.schedule(chat_id, message_id, self._live.request_response_ttl_seconds())
+        try:
+            self._deletion.schedule(chat_id, message_id, self._live.request_response_ttl_seconds())
+        except Exception as error:  # noqa: BLE001 - cleanup is best-effort, never break a request
+            LOGGER.warning(
+                "Could not schedule message deletion",
+                extra={"chat_id": chat_id, "message_id": message_id, "error": str(error)},
+            )
 
     async def _reply(self, message: Any, text: str) -> Any:
         sent = await message.reply_text(text)
