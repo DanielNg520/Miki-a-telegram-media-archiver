@@ -158,6 +158,13 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Tests dispatched: prompts must list exact import paths (`miki_sorter_bot.*`), and use the `database_connection` fixture directly. Past DeepSeek defects: invented paths, fixture passed as arg.
 - Handoff: `message_deletion.py` `MessageDeletionService.schedule/sweep`, `make_sweep_job` (60s, wired in `main.py`). Table `scheduled_deletions` (migration 14), repo `schedule_deletion/due_deletions/remove_deletion`. Specs `request_response_ttl_hours`, `request_delete_user_message`. `RetrievalService(deletion=)` routes replies via `_reply`, schedules copies and request message. Phase 6 notices call `deletion.schedule`. Post-audit: TTL capped 48h (Telegram limit), retryable failures re-queue +300s, `_schedule` is best-effort, indexer cache fills only when enabled. DeepSeek output clean; hand edits: imports, `__init__` param, `_reply` substitutions, `_schedule_request(chat_id, message_id)` signature, test expectations. Next: phase 5.
 
+## Phase 4b — Duplicate media link [x] DONE
+- Extends: `MessageIndexer.index` (stores `posts.file_unique_id`, migration 15), `SortingService` post-copy path. Backup and sorting unchanged; duplicates are still archived and backed up.
+- `SqliteRepositories.find_duplicate` returns the oldest earlier available post with the same `file_unique_id` and a different `logical_post_key`.
+- `_notify_duplicate` replies to the source message with a `post_link` to the earlier archive copy; once per album; best-effort, metric `duplicate_notice_failures`. Spec `duplicate_notice_enabled` (default on).
+- Limits: exact file match only (re-encoded or cropped copies differ); posts indexed before migration 15 have no id until re-crawled; burner backfill records ids but sends no notice.
+- Handoff: 493 tests, `make verify` green. Hand fixes: `find_duplicate` first select lacked `file_unique_id`, `id < ?` (earlier only), `post_link` strips `-100` only when present, `media_unique_id` guards non-list photo.
+
 ## Phase 5 — Topic rotation and closed-topic cleanup [ ] TODO
 - Needs: phases 3 and 4. Files: new `rotation.py`, `migrations.py`, `repositories.py`, `management.py`, `main.py`, `settings_registry.py`.
 - Extends: `TopicActivity` (count), `source_thread_id` runtime override (same key `/source_set` writes), JobQueue tick, `track_topic_status`.

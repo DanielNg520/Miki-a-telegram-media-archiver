@@ -31,7 +31,12 @@ from miki_sorter_bot.indexing import (
 from miki_sorter_bot.lookback import CapturedMedia, RecentMediaBuffer
 from miki_sorter_bot.periodic_notice import PeriodicNoticeService
 from miki_sorter_bot.topic_activity import TopicActivity
-from miki_sorter_bot.repositories import RouteMappingRecord, SqliteRepositories, TopicRecord
+from miki_sorter_bot.repositories import (
+    IndexedPostRecord,
+    RouteMappingRecord,
+    SqliteRepositories,
+    TopicRecord,
+)
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
 from miki_sorter_bot.settings_registry import LiveSettings
 
@@ -267,6 +272,26 @@ class SortingService:
                     "message_id": getattr(message, "message_id", None),
                     "error": str(error),
                 },
+            )
+
+    async def _notify_duplicate(self, message: Any, original: IndexedPostRecord) -> None:
+        if not self._live.duplicate_notice_enabled():
+            return
+        reply = getattr(message, "reply_text", None)
+        if reply is None:
+            return
+        try:
+            link = post_link(
+                original.source_chat_id,
+                original.source_thread_id,
+                original.source_message_id,
+            )
+            await reply("This media was already posted: " + link, do_quote=True)
+        except Exception as error:
+            self._repositories.increment_metric("duplicate_notice_failures", 1)
+            LOGGER.warning(
+                "Could not send duplicate notice",
+                extra={"message_id": getattr(message, "message_id", None), "error": str(error)},
             )
 
     def _on_lookback_expire(
@@ -938,6 +963,11 @@ class SortingService:
             destination_thread_id=topic.thread_id,
             destination_message_id=copied.message_id,
         )
+        original = self._repositories.find_duplicate(
+            self._settings.archive_chat_id, copied.message_id
+        )
+        if original is not None:
+            await self._notify_duplicate(message, original)
         if self._live.send_confirmation():
             await self._confirm_delivery(message, topic)
 
@@ -1179,6 +1209,7 @@ class SortingService:
                     "outcome_unknown",
                 )
 
+        album_original: IndexedPostRecord | None = None
         for (message, job, delivery), destination_message_id in zip(deliveries, sent_ids):
             self._repositories.update_delivery(
                 delivery.id,
@@ -1195,6 +1226,12 @@ class SortingService:
                 destination_thread_id=topic.thread_id,
                 destination_message_id=destination_message_id,
             )
+            if album_original is None:
+                album_original = self._repositories.find_duplicate(
+                    self._settings.archive_chat_id, destination_message_id
+                )
+        if album_original is not None:
+            await self._notify_duplicate(messages[0], album_original)
         if len(sent_ids) < len(deliveries):
             self._repositories.increment_metric(
                 "telegram_delivery_outcome_unknown",
@@ -1529,6 +1566,11 @@ def _media_group_payload(
         else:
             return None
     return tuple(payload)
+
+
+def post_link(chat_id: int, thread_id: int, message_id: int) -> str:
+    internal_id = str(chat_id).removeprefix("-100").lstrip("-")
+    return f"https://t.me/c/{internal_id}/{thread_id}/{message_id}"
 
 
 def _album_file_id(message: Any, kind: str | None) -> str | None:

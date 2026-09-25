@@ -276,3 +276,104 @@ def test_index_caches_list_mappings_when_enabled(database_connection) -> None:
     assert indexer.index(_message(15), 2)
 
     assert call_count == 2
+
+
+def _photo(message_id, unique_id, *, album=None):
+    return SimpleNamespace(
+        message_id=message_id,
+        message_thread_id=9,
+        media_group_id=album,
+        caption="x",
+        text=None,
+        date=None,
+        from_user=SimpleNamespace(id=10, is_bot=False),
+        animation=None,
+        audio=None,
+        document=None,
+        photo=[SimpleNamespace(file_unique_id=unique_id)],
+        sticker=None,
+        video=None,
+        video_note=None,
+        voice=None,
+    )
+
+
+def test_duplicate_same_unique_id(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    indexer.index(_photo(100, "u1"), chat_id=1)
+    indexer.index(_photo(200, "u1"), chat_id=1)
+
+    result = repos.find_duplicate(1, 200)
+    assert result is not None
+    assert result.source_message_id == 100
+
+    assert repos.find_duplicate(1, 100) is None
+
+
+def test_duplicate_different_unique_ids(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    indexer.index(_photo(100, "u1"), chat_id=1)
+    indexer.index(_photo(200, "u2"), chat_id=1)
+
+    assert repos.find_duplicate(1, 200) is None
+
+
+def test_album_members_not_duplicates(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    indexer.index(_photo(100, "u1", album="a1"), chat_id=1)
+    indexer.index(_photo(200, "u1", album="a1"), chat_id=1)
+
+    assert repos.find_duplicate(1, 200) is None
+    assert repos.find_duplicate(1, 100) is None
+
+
+def test_unavailable_post_not_returned(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    indexer.index(_photo(100, "u1"), chat_id=1)
+    first = repos.get_post(1, 100)
+    repos.mark_post_unavailable(first.id)
+
+    indexer.index(_photo(200, "u1"), chat_id=1)
+    assert repos.find_duplicate(1, 200) is None
+
+
+def test_message_without_file_unique_id(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    msg = _photo(100, "u1")
+    msg.photo = [object()]
+    indexer.index(msg, chat_id=1)
+
+    indexer.index(_photo(200, "u1"), chat_id=1)
+    assert repos.find_duplicate(1, 200) is None
+
+
+def test_reindex_without_unique_id_keeps_stored_value(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    indexer.index(_photo(100, "u1"), chat_id=1)
+
+    msg = _photo(100, "u1")
+    msg.photo = [object()]
+    indexer.index(msg, chat_id=1)
+
+    indexer.index(_photo(200, "u1"), chat_id=1)
+    result = repos.find_duplicate(1, 200)
+    assert result is not None
+    assert result.source_message_id == 100
+
+
+def test_three_posts_returns_oldest(database_connection):
+    repos = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repos, bot_id=1)
+    indexer.index(_photo(100, "u1"), chat_id=1)
+    indexer.index(_photo(200, "u1"), chat_id=1)
+    indexer.index(_photo(300, "u1"), chat_id=1)
+
+    result = repos.find_duplicate(1, 300)
+    assert result is not None
+    assert result.source_message_id == 100

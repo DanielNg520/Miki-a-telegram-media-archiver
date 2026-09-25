@@ -442,6 +442,15 @@ MIGRATIONS = (
         CREATE INDEX idx_scheduled_deletions_delete_at ON scheduled_deletions(delete_at);
         """,
     ),
+    Migration(
+        15,
+        "posts_file_unique_id",
+        """
+        ALTER TABLE posts ADD COLUMN file_unique_id TEXT;
+        CREATE INDEX idx_posts_file_unique_id ON posts(file_unique_id)
+            WHERE file_unique_id IS NOT NULL;
+        """,
+    ),
 )
 
 

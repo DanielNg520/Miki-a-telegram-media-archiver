@@ -10,8 +10,9 @@ import pytest
 from telegram.error import BadRequest, NetworkError, TimedOut
 
 from miki_sorter_bot.config import TopicForwardingPair
+from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.repositories import SqliteRepositories
-from miki_sorter_bot.sorting import PendingAlbum, RouteMatcher, SortingService
+from miki_sorter_bot.sorting import PendingAlbum, RouteMatcher, SortingService, post_link
 
 
 def _settings(
@@ -2175,3 +2176,109 @@ def test_album_uploads_are_serialised_across_pending_albums(database_connection)
     assert bot.send_media_group.await_count == 4
     for source_message_id in range(20, 28):
         assert repositories.get_delivery(-100, source_message_id, -200, 9).status == "sent"
+
+
+async def _run_sort_with_duplicate_first(
+    database_connection, second_unique_id, duplicate_notice_enabled=True, reply_side_effect=None
+):
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    if not duplicate_notice_enabled:
+        repositories.set_runtime_setting("duplicate_notice_enabled", "false")
+
+    indexing = IndexingService(_settings(), repositories)
+
+    first_message = _message("#Japan", message_id=12)
+    first_message.photo = [SimpleNamespace(file_id="f1", file_unique_id="uniq-1")]
+    second_message = _message("#Japan", message_id=13)
+    second_message.photo = [SimpleNamespace(file_id="f2", file_unique_id=second_unique_id)]
+
+    message_ids = iter([99, 100])
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(
+            side_effect=lambda *a, **kw: SimpleNamespace(message_id=next(message_ids))
+        ),
+    )
+
+    first_update = SimpleNamespace(
+        effective_message=first_message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+    second_update = SimpleNamespace(
+        effective_message=second_message,
+        effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+    )
+
+    if reply_side_effect is not None:
+        second_message.reply_text = AsyncMock(side_effect=reply_side_effect)
+
+    service = SortingService(_settings(), repositories, indexing)
+    await service.handle_update(first_update, SimpleNamespace(bot=bot))
+    await service.handle_update(second_update, SimpleNamespace(bot=bot))
+    return first_message, second_message, bot
+
+
+def test_same_unique_id_replies_to_second_message_with_archive_link(database_connection) -> None:
+    async def scenario():
+        first_message, second_message, bot = await _run_sort_with_duplicate_first(
+            database_connection,
+            second_unique_id="uniq-1",
+        )
+        first_message.reply_text.assert_not_called()
+        second_message.reply_text.assert_called_once()
+        reply_text = second_message.reply_text.call_args.args[0]
+        assert "already posted" in reply_text
+        assert "https://t.me/c/200/9/99" in reply_text
+        assert second_message.reply_text.call_args.kwargs.get("do_quote") is True
+        assert bot.copy_message.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_different_unique_ids_no_notice(database_connection) -> None:
+    async def scenario():
+        first_message, second_message, bot = await _run_sort_with_duplicate_first(
+            database_connection,
+            second_unique_id="uniq-2",
+        )
+        first_message.reply_text.assert_not_called()
+        second_message.reply_text.assert_not_called()
+        assert bot.copy_message.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_notice_disabled_skips_reply_but_copies_both(database_connection) -> None:
+    async def scenario():
+        first_message, second_message, bot = await _run_sort_with_duplicate_first(
+            database_connection,
+            second_unique_id="uniq-1",
+            duplicate_notice_enabled=False,
+        )
+        first_message.reply_text.assert_not_called()
+        second_message.reply_text.assert_not_called()
+        assert bot.copy_message.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_reply_failure_counts_metric_and_sort_still_succeeds(database_connection) -> None:
+    async def scenario():
+        repositories = SqliteRepositories(database_connection)
+        first_message, second_message, bot = await _run_sort_with_duplicate_first(
+            database_connection,
+            second_unique_id="uniq-1",
+            reply_side_effect=RuntimeError("reply boom"),
+        )
+        metrics = repositories.metrics_snapshot()
+        assert metrics.get("duplicate_notice_failures") == 1
+        assert bot.copy_message.await_count == 2
+        assert first_message.reply_text.await_count == 0
+        assert second_message.reply_text.await_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_post_link_formats_archive_link() -> None:
+    assert post_link(-1001234567890, 7, 42) == "https://t.me/c/1234567890/7/42"

@@ -83,6 +83,15 @@ def media_type(message: object) -> str | None:
     return None
 
 
+def media_unique_id(message: object, kind: str) -> str | None:
+    """Telegram's stable per-file id; the largest size for photos."""
+    media = getattr(message, kind, None)
+    if kind == "photo":
+        media = media[-1] if isinstance(media, (list, tuple)) and media else None
+    value = getattr(media, "file_unique_id", None)
+    return value if isinstance(value, str) else None
+
+
 class MessageIndexer:
     def __init__(
         self, repositories: SqliteRepositories, bot_id: int, *, cache_mappings: bool = False
@@ -148,6 +157,7 @@ class MessageIndexer:
                 sender_is_bot=sender_is_bot,
                 source_kind=source_kind,
                 message_created_at=created_at_value,
+                file_unique_id=media_unique_id(message, detected_media),
             ),
             extraction.tokens,
         )

@@ -298,6 +298,14 @@ def default_registry() -> SettingsRegistry:
                 lambda s: int(getattr(s, "default_topic_id", 0)),
             ),
             SettingSpec(
+                "duplicate_notice_enabled",
+                "delivery",
+                "Reply with a link to the earlier post when the same media file was already archived.",
+                parse_bool,
+                render_bool,
+                lambda s: bool(getattr(s, "duplicate_notice_enabled", True)),
+            ),
+            SettingSpec(
                 "send_confirmation",
                 "delivery",
                 "Reply with a short confirmation after sorting each item.",
@@ -454,6 +462,9 @@ class LiveSettings:
 
     def lookback_capacity(self) -> int:
         return int(self.get("lookback_capacity"))
+
+    def duplicate_notice_enabled(self) -> bool:
+        return bool(self.get("duplicate_notice_enabled"))
 
     def send_confirmation(self) -> bool:
         return bool(self.get("send_confirmation"))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -121,6 +121,7 @@ class IndexedPostInput:
     sender_is_bot: bool
     source_kind: str
     message_created_at: str | None
+    file_unique_id: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +264,10 @@ class PostRepository(Protocol):
     ) -> IndexedPostRecord: ...
 
     def get_post(self, source_chat_id: int, source_message_id: int) -> IndexedPostRecord | None: ...
+
+    def find_duplicate(
+        self, source_chat_id: int, source_message_id: int
+    ) -> IndexedPostRecord | None: ...
 
     def reindex_batch(
         self,
@@ -759,9 +764,9 @@ class SqliteRepositories:
                     source_chat_id, source_thread_id, source_message_id,
                     media_group_id, logical_post_key, media_type, caption_preview,
                     extractor_version, sender_user_id, sender_is_bot, source_kind,
-                    message_created_at, is_available
+                    message_created_at, file_unique_id, is_available
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT (source_chat_id, source_message_id) DO UPDATE SET
                     source_thread_id = excluded.source_thread_id,
                     media_group_id = excluded.media_group_id,
@@ -776,6 +781,7 @@ class SqliteRepositories:
                         excluded.message_created_at,
                         posts.message_created_at
                     ),
+                    file_unique_id = COALESCE(excluded.file_unique_id, posts.file_unique_id),
                     is_available = 1,
                     updated_at = CURRENT_TIMESTAMP
                 """,
@@ -792,6 +798,7 @@ class SqliteRepositories:
                     int(post.sender_is_bot),
                     post.source_kind,
                     post.message_created_at,
+                    post.file_unique_id,
                 ),
             )
             row = self._connection.execute(
@@ -838,6 +845,40 @@ class SqliteRepositories:
             (source_chat_id, source_message_id),
         ).fetchone()
         return _indexed_post_record(row) if row is not None else None
+
+    def find_duplicate(
+        self,
+        source_chat_id: int,
+        source_message_id: int,
+    ) -> IndexedPostRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT id, logical_post_key, file_unique_id
+            FROM posts
+            WHERE source_chat_id = ? AND source_message_id = ?
+            """,
+            (source_chat_id, source_message_id),
+        ).fetchone()
+        if row is None or row["file_unique_id"] is None:
+            return None
+
+        duplicate_row = self._connection.execute(
+            """
+            SELECT id, source_chat_id, source_thread_id, source_message_id,
+                   media_group_id, logical_post_key, media_type, caption_preview,
+                   extractor_version, sender_user_id, sender_is_bot, source_kind,
+                   message_created_at, is_available
+            FROM posts
+            WHERE file_unique_id = ?
+                AND is_available = 1
+                AND logical_post_key != ?
+                AND id < ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (row["file_unique_id"], row["logical_post_key"], row["id"]),
+        ).fetchone()
+        return _indexed_post_record(duplicate_row) if duplicate_row is not None else None
 
     def get_post_tokens(self, post_id: int) -> frozenset[SearchToken]:
         rows = self._connection.execute(
