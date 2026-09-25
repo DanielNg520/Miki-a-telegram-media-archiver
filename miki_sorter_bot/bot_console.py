@@ -80,7 +80,10 @@ COMMAND_METHODS: dict[str, str] = {
 }
 
 # Commands that call the live Telegram API (context.bot). Only these open a Bot.
-NEEDS_BOT: frozenset[str] = frozenset({"topic_register", "health"})
+# dead_letter_retry re-drives the job through copy_message, so it needs a real
+# Bot: without one it failed with "'NoneType' object has no attribute
+# 'copy_message'" and left the job marked failed a second time.
+NEEDS_BOT: frozenset[str] = frozenset({"topic_register", "health", "dead_letter_retry"})
 
 
 def list_commands() -> list[str]:

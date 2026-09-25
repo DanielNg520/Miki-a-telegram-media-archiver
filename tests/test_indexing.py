@@ -206,3 +206,29 @@ def test_reindex_processes_only_bounded_outdated_rows(database_connection) -> No
         for row in database_connection.execute("SELECT extractor_version FROM posts ORDER BY id")
     ]
     assert versions == [EXTRACTOR_VERSION, 0]
+
+def test_extract_search_tokens_drops_short_configured_keywords() -> None:
+    result = extract_search_tokens(
+        "some caption text a go",
+        configured_values={
+            ("keyword", "a"),
+            ("keyword", "go"),
+            ("keyword", "caption"),
+        },
+    )
+    tokens = {(t.kind, t.normalized_value) for t in result.tokens}
+    assert ("keyword", "a") not in tokens
+    assert ("keyword", "go") not in tokens
+    assert ("keyword", "caption") in tokens
+
+
+def test_extractor_version_is_5() -> None:
+    assert EXTRACTOR_VERSION == 5
+
+
+def test_extract_search_tokens_hyphenated_code_still_extracts() -> None:
+    result = extract_search_tokens("Photo KEA-022 here")
+    assert any(
+        t.kind == "code" and t.value == "KEA-022" and t.normalized_value == "kea-022"
+        for t in result.tokens
+    )

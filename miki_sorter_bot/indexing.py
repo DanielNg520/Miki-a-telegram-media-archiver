@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from miki_sorter_bot.config import Settings
 from miki_sorter_bot.repositories import IndexedPostInput, SearchToken, SqliteRepositories
 
-EXTRACTOR_VERSION = 4
+EXTRACTOR_VERSION = 5
 TOKEN_RE = re.compile(r"[^\W_]+(?:-[^\W_]+)*", re.UNICODE)
 HASHTAG_RE = re.compile(r"(?<!\w)#(\w+(?:-\w+)*)", re.UNICODE)
 SENTENCE_END_RE = re.compile(r"[.!?]\s*$")
@@ -56,7 +56,7 @@ def extract_search_tokens(
         normalized_value = " ".join(configured_value.casefold().split())
         if kind == "hashtag":
             continue
-        if kind == "keyword" and contains_keyword(text, normalized_value):
+        if kind == "keyword" and len(normalized_value) >= 3 and contains_keyword(text, normalized_value):
             tokens.add(SearchToken("keyword", configured_value, normalized_value))
         elif kind == "phrase" and contains_phrase(text, normalized_value):
             tokens.add(SearchToken("phrase", configured_value, normalized_value))

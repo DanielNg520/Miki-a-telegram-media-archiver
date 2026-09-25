@@ -51,15 +51,15 @@ All optional; absence disables the layer. Add to `.env`:
 
 ```env
 BURNER_ENABLED=true
-TELETHON_API_ID=1234567           # from https://my.telegram.org
+TELETHON_API_ID=1234567             # from https://my.telegram.org
 TELETHON_API_HASH=...
-TELETHON_SESSION=...              # minted by `miki-burner-login`, treat like BOT_TOKEN
+TELETHON_SESSION=...                # minted by `miki-burner-login`, treat like BOT_TOKEN
 BURNER_POLL_INTERVAL_SECONDS=30
-BURNER_OPERATOR_USER_IDS=         # teammates allowed to run /burner (⊆/⊇ ADMIN_USER_IDS)
+BURNER_OPERATOR_USER_IDS=           # teammates allowed to run /burner (or ADMIN_USER_IDS)
 
 # Backup offload
-BURNER_BACKUP_CHAT_ID=            # the archive group (already has members)
-BURNER_BACKUP_THREAD_ID=         # optional topic to keep backups out of media topics
+BURNER_BACKUP_CHAT_ID=              # the archive group (already has members)
+BURNER_BACKUP_THREAD_ID=            # optional topic to keep backups out of media topics
 BURNER_BACKUP_AGE_RECIPIENT=age1... # age public key; private key stays OFF the droplet
 BURNER_BACKUP_LOCAL_RETENTION=3
 ```
@@ -89,6 +89,11 @@ The session string is a **full-account credential** — store it the way you sto
 Each command exits after bounded work. Backfill and bridge use a stored checkpoint so repeated
 runs do the minimum — backfill only reads messages newer than what's indexed; a bridge forwards
 only messages newer than its last-forwarded id.
+
+On Linux, `miki-ops install` writes and enables systemd user units `miki-burner-backfill.timer`
+(`OnCalendar=*-*-* 04:00:00`, `Persistent=true`) and oneshot `miki-burner-backfill.service`
+(`ExecStart=.../miki-burner backfill`); no manual cron entry is needed on that host; `miki-ops
+uninstall` removes both units.
 
 ## History backfill
 
@@ -152,7 +157,7 @@ but a bounded, takeout-based sweep of your own account is a reasonable choice.
 ## Telegram command plane (optional)
 
 If a `miki-burner run` (or periodic `miki-burner once`) process is draining the queue, teammates
-can drive the burner from Telegram, gated by `BURNER_OPERATOR_USER_IDS ∪ ADMIN_USER_IDS`:
+can drive the burner from Telegram, gated by `BURNER_OPERATOR_USER_IDS` or `ADMIN_USER_IDS`:
 
 - `/burner status` — heartbeat/capability summary (answered inline, always available).
 - `/burner <kind>` — enqueues a command (`noop`, `backup_now`, `backfill`, `bridge_add`,

@@ -36,6 +36,8 @@ LAUNCH_AGENTS = Path("~/Library/LaunchAgents").expanduser()
 
 SYSTEMD_USER_DIR = Path("~/.config/systemd/user").expanduser()
 SYSTEMD_UNIT = f"{SERVICE_NAME}-sorter.service"
+BACKFILL_SERVICE_UNIT = "miki-burner-backfill.service"
+BACKFILL_TIMER_UNIT = "miki-burner-backfill.timer"
 
 
 @dataclass(slots=True)
@@ -50,6 +52,20 @@ def _ok(*messages: str) -> Result:
 
 def _err(*messages: str) -> Result:
     return Result(1, list(messages))
+
+
+def _run(args: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
+    """Run a command with a bounded timeout so a stuck helper can't hang the CLI
+    (or a health-check/verification client) indefinitely."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        return subprocess.CompletedProcess(
+            args,
+            124,
+            stdout=error.stdout or "",
+            stderr=(error.stderr or "") + "\nmiki: command timed out",
+        )
 
 
 def resolve_program() -> str | None:
@@ -241,11 +257,7 @@ def _win_load() -> Result:
 def _win_unload() -> Result:
     if _win_pid() is None:
         return _ok("miki: not running")
-    result = subprocess.run(
-        ["taskkill", "/F", "/T", "/IM", WINDOWS_IMAGE],
-        capture_output=True,
-        text=True,
-    )
+    result = _run(["taskkill", "/F", "/T", "/IM", WINDOWS_IMAGE])
     if result.returncode == 0:
         return _ok("miki: stopped")
     return _err(f"miki: stop failed — {result.stdout.strip() or result.stderr.strip()}")
@@ -267,10 +279,8 @@ def _win_restart() -> Result:
 
 def _win_pid() -> int | None:
     try:
-        out = subprocess.run(
+        out = _run(
             ["tasklist", "/fi", f"imagename eq {WINDOWS_IMAGE}", "/fo", "csv", "/nh"],
-            capture_output=True,
-            text=True,
             timeout=8,
         ).stdout
     except (OSError, subprocess.SubprocessError):
@@ -287,13 +297,19 @@ def _win_pid() -> int | None:
 # ── Linux: systemd user service ─────────────────────────────────────────────
 
 def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["systemctl", "--user", *args], capture_output=True, text=True
-    )
+    return _run(["systemctl", "--user", *args])
 
 
 def _systemd_unit_path() -> Path:
     return SYSTEMD_USER_DIR / SYSTEMD_UNIT
+
+
+def _backfill_service_path() -> Path:
+    return SYSTEMD_USER_DIR / BACKFILL_SERVICE_UNIT
+
+
+def _backfill_timer_path() -> Path:
+    return SYSTEMD_USER_DIR / BACKFILL_TIMER_UNIT
 
 
 def _systemd_unit_text(program: str, workdir: Path) -> str:
@@ -319,6 +335,38 @@ WantedBy=default.target
 """
 
 
+def _backfill_unit_text(program: str, workdir: Path) -> str:
+    bindir = str(Path(program).parent)
+    log = LOG_DIR / "miki-backfill.out.log"
+    return f"""[Unit]
+Description=Miki Telegram sorter bot backfill
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory={workdir}
+Environment=PATH={bindir}:/usr/local/bin:/usr/bin:/bin
+ExecStart={bindir}/miki-burner backfill
+StandardOutput=append:{log}
+StandardError=append:{log}
+"""
+
+
+def _backfill_timer_text() -> str:
+    return f"""[Unit]
+Description=Run the Miki sorter bot backfill periodically
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+
+[Install]
+WantedBy=timers.target
+"""
+
+
 def _linux_install(workdir: Path) -> Result:
     program = resolve_program()
     if program is None:
@@ -335,15 +383,30 @@ def _linux_install(workdir: Path) -> Result:
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     path = _systemd_unit_path()
     path.write_text(_systemd_unit_text(program, workdir), encoding="utf-8")
+    backfill_service = _backfill_service_path()
+    backfill_service.write_text(_backfill_unit_text(program, workdir), encoding="utf-8")
+    backfill_timer = _backfill_timer_path()
+    backfill_timer.write_text(_backfill_timer_text(), encoding="utf-8")
     _systemctl("daemon-reload")
     enabled = _systemctl("enable", SYSTEMD_UNIT)
-    messages = [f"miki: wrote {path} -> {program}"]
+    messages = [
+        f"miki: wrote {path} -> {program}",
+        f"miki: wrote {backfill_timer} (service {backfill_service.name})",
+    ]
     if enabled.returncode != 0:
         messages.append(
             f"miki: warning — could not enable autostart: {enabled.stderr.strip()}"
         )
     else:
         messages.append("miki: enabled autostart at logon")
+    timer_enabled = _systemctl("enable", BACKFILL_TIMER_UNIT)
+    if timer_enabled.returncode != 0:
+        messages.append(
+            "miki: warning — could not enable backfill timer: "
+            f"{timer_enabled.stderr.strip()}"
+        )
+    else:
+        messages.append("miki: enabled periodic backfill timer")
     messages.append(
         "installed. Start now with:  miki-ops load  "
         "(tip: `loginctl enable-linger $USER` to run without an active session)"
@@ -353,11 +416,17 @@ def _linux_install(workdir: Path) -> Result:
 
 def _linux_uninstall() -> Result:
     messages = list(_linux_unload().messages)
+    _systemctl("stop", BACKFILL_TIMER_UNIT)
     _systemctl("disable", SYSTEMD_UNIT)
-    path = _systemd_unit_path()
-    if path.exists():
-        path.unlink()
-        messages.append(f"miki: removed {path}")
+    _systemctl("disable", BACKFILL_TIMER_UNIT)
+    for path in (
+        _systemd_unit_path(),
+        _backfill_service_path(),
+        _backfill_timer_path(),
+    ):
+        if path.exists():
+            path.unlink()
+            messages.append(f"miki: removed {path}")
     _systemctl("daemon-reload")
     return _ok(*messages)
 
@@ -426,9 +495,7 @@ def _mac_load() -> Result:
     path = _plist_path()
     if not path.exists():
         return _err(f"miki: plist missing ({path})")
-    result = subprocess.run(
-        ["/bin/launchctl", "load", str(path)], capture_output=True, text=True
-    )
+    result = _run(["/bin/launchctl", "load", str(path)])
     if result.returncode == 0:
         return _ok("miki: loaded")
     return _err(f"miki: load failed - {result.stderr.strip()}")
@@ -438,22 +505,16 @@ def _mac_unload() -> Result:
     path = _plist_path()
     if not path.exists():
         return _ok()
-    result = subprocess.run(
-        ["/bin/launchctl", "unload", str(path)], capture_output=True, text=True
-    )
+    result = _run(["/bin/launchctl", "unload", str(path)])
     if result.returncode == 0:
         return _ok("miki: unloaded")
     return _err(f"miki: unload failed - {result.stderr.strip()}")
 
 
 def _mac_restart() -> Result:
-    uid = subprocess.run(
-        ["/usr/bin/id", "-u"], capture_output=True, text=True
-    ).stdout.strip()
-    result = subprocess.run(
-        ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"],
-        capture_output=True,
-        text=True,
+    uid = _run(["/usr/bin/id", "-u"]).stdout.strip()
+    result = _run(
+        ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"]
     )
     if result.returncode == 0:
         return _ok("miki: restarted")
@@ -461,14 +522,8 @@ def _mac_restart() -> Result:
 
 
 def _mac_running() -> bool:
-    uid = subprocess.run(
-        ["/usr/bin/id", "-u"], capture_output=True, text=True
-    ).stdout.strip()
-    result = subprocess.run(
-        ["/bin/launchctl", "print", f"gui/{uid}/{SERVICE_LABEL}"],
-        capture_output=True,
-        text=True,
-    )
+    uid = _run(["/usr/bin/id", "-u"]).stdout.strip()
+    result = _run(["/bin/launchctl", "print", f"gui/{uid}/{SERVICE_LABEL}"])
     return result.returncode == 0
 
 

@@ -157,3 +157,118 @@ def test_recovered_sort_job_completes_with_confirmations_enabled(database_connec
     assert recovered == 1
     assert repositories.get_job(job.id).status == "completed"
     assert repositories.list_dead_letters() == []
+
+
+def _strand_album_member(
+    repositories: SqliteRepositories,
+    source_message_id: int,
+) -> int:
+    """Reproduce what an outcome_unknown album upload leaves behind: a failed
+    job plus a delivery that never got a destination message id."""
+
+    job = repositories.enqueue(
+        "sort",
+        f"sort:-100:{source_message_id}:-200:9",
+        {
+            "source_chat_id": -100,
+            "source_message_id": source_message_id,
+            "destination_chat_id": -200,
+            "destination_thread_id": 9,
+            "reason": "hashtag:tokyo",
+            "delivery_method": "send_media_group",
+        },
+    )
+    delivery = repositories.ensure_delivery(
+        job.id,
+        source_chat_id=-100,
+        source_message_id=source_message_id,
+        destination_chat_id=-200,
+        destination_thread_id=9,
+        reason="hashtag:tokyo",
+    )
+    repositories.claim_job(job.id)
+    repositories.update_delivery(delivery.id, "failed", reason="outcome unknown after timeout")
+    repositories.update_job(job.id, "failed", error="delivery outcome unknown after timeout")
+    repositories.add_dead_letter(
+        job.id,
+        "sort_media_group_uncertain",
+        job.payload,
+        "outcome_unknown",
+        "delivery outcome unknown after timeout",
+    )
+    return job.id
+
+
+def _recovery_for(repositories: SqliteRepositories) -> JobRecoveryService:
+    settings = _settings()
+    return JobRecoveryService(
+        repositories,
+        SortingService(
+            settings,
+            repositories,
+            SimpleNamespace(index_copy=Mock(return_value=False)),
+        ),
+        RetrievalService(settings, repositories),
+        failed_cooldown_minutes=0,
+    )
+
+
+def test_undelivered_failed_album_members_are_retried(database_connection) -> None:
+    """The whole point: a grouped upload that timed out marks every member's job
+    failed, and the pending sweep never looks at failed jobs. Without this the
+    siblings of the first member stay stranded for good."""
+
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    recovery = _recovery_for(repositories)
+    first = _strand_album_member(repositories, 61878)
+    second = _strand_album_member(repositories, 61879)
+    bot = SimpleNamespace(
+        id=99,
+        copy_message=AsyncMock(
+            side_effect=[SimpleNamespace(message_id=301), SimpleNamespace(message_id=302)]
+        ),
+    )
+
+    recovered = asyncio.run(recovery.run_once(SimpleNamespace(bot=bot)))
+
+    assert recovered == 2
+    assert repositories.get_job(first).status == "completed"
+    assert repositories.get_job(second).status == "completed"
+    assert bot.copy_message.await_count == 2
+    assert repositories.metrics_snapshot()["failed_jobs_retried"] == 2
+    # The original dead letters are resolved once the job completes.
+    assert all(entry["resolved_at"] is not None for entry in repositories.list_dead_letters())
+
+
+def test_failed_job_retry_skips_members_already_delivered(database_connection) -> None:
+    """A member Telegram did accept has a destination message id recorded;
+    re-copying it would duplicate it in the archive."""
+
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Inbox")
+    job_id = _strand_album_member(repositories, 61878)
+    delivery = repositories.get_delivery(-100, 61878, -200, 9)
+    repositories.update_delivery(delivery.id, "sent", destination_message_id=555)
+    repositories.update_job(job_id, "failed", error="delivery outcome unknown after timeout")
+
+    assert repositories.list_undelivered_failed_jobs(100) == []
+
+
+def test_failed_job_retry_gives_up_after_max_attempts(database_connection) -> None:
+    """A job that can never succeed must stop being re-selected, and must not
+    add a fresh dead letter on every sweep."""
+
+    repositories = SqliteRepositories(database_connection)
+    # No topic registered, so resume_job raises "targets an inactive topic".
+    recovery = _recovery_for(repositories)
+    job_id = _strand_album_member(repositories, 61879)
+    context = SimpleNamespace(bot=SimpleNamespace(id=99, copy_message=AsyncMock()))
+
+    for _ in range(6):
+        assert asyncio.run(recovery.run_once(context)) == 0
+
+    assert repositories.get_job(job_id).attempts >= 5
+    assert repositories.list_undelivered_failed_jobs(100) == []
+    # One dead letter from the original failure; the retries must not pile on.
+    assert len(repositories.list_dead_letters()) == 1

@@ -60,8 +60,8 @@ Everything the bot runs on a timer, plus the out-of-process burner:
 
 | Worker | Where | Cadence | Self-healing |
 |---|---|---|---|
-| Album flush | `SortingService` (in-process timers) | per album debounce | drained on graceful shutdown; startup recovery resumes routable buffers |
-| Job recovery | `JobRecoveryService` via `job_queue` | `JOB_RECOVERY_INTERVAL_SECONDS` + at startup | running→pending, atomic claim prevents double-delivery |
+| Album flush | `SortingService` (in-process timers) | per album debounce | drained on graceful shutdown; startup recovery resumes routable buffers; uploads pass through a one-at-a-time gate |
+| Job recovery | `JobRecoveryService` via `job_queue` | `JOB_RECOVERY_INTERVAL_SECONDS` + at startup | running→pending, atomic claim prevents double-delivery; **also retries `failed` jobs whose delivery never landed** |
 | Webhook supervisor | `WebhookSupervisor` via `job_queue` | `WEBHOOK_RECONCILE_INTERVAL_SECONDS` | re-registers on confirmed drift; circuit breaker stops ineffective heals |
 | Daily backup | `_schedule_daily_backup` | `BACKUP_TIME` daily | verified snapshot; failures counted, never fatal |
 | Sanity checks | `_schedule_sanity_checks` | `SANITY_CHECK_INTERVAL_MINUTES` | surfaces config/activity drift |
@@ -80,6 +80,30 @@ queue with `reported_at`), `burner_bridges` (foreign chat → source topic + che
 `backfill_cursors` (deep-backfill floor per chat/topic — lowest scanned id + done). Migration 11
 rebuilt `posts` to add the `backfill` `source_kind` (children snapshotted/restored to preserve FK
 integrity under the FK-on migration transaction).
+
+## Album delivery: how a member can be lost, and what stops it
+
+Three defects, all found from the same symptom ("only the first of the batch reached the archive"):
+
+1. **Concurrent uploads after a restart.** Polling replays the whole backlog in one `getUpdates`
+   (`TELEGRAM_DROP_PENDING_UPDATES=false`, which is correct — nothing should be dropped), so every
+   buffered album's debounce expires in the same second. Firing them all at once saturated the link
+   and returned every one as `outcome_unknown`. `SortingService._album_send_gate`
+   (`_MAX_CONCURRENT_ALBUM_SENDS`) now allows one album upload at a time; a Telegram album is capped
+   at 10 items, so serialising costs little.
+2. **`failed` jobs were never retried.** An `outcome_unknown` group marks *every* member's job and
+   delivery `failed` and dead-letters them, deliberately suppressing the per-member fallback.
+   `list_pending_jobs` only sees `pending`, so those members were stranded permanently.
+   `JobRecoveryService._retry_undelivered_failures` now re-drives them via
+   `list_undelivered_failed_jobs` → `SortingService.resume_job` → `copy_message`. Safety: the query
+   requires `destination_message_id IS NULL`, so a member Telegram actually accepted is never
+   re-copied; `attempts` caps the retries and `exhaust_failed_job` charges an attempt even when the
+   job raises before `claim_job`, so a hopeless job drops out instead of looping forever.
+3. **The manual escape hatch was broken.** `dead_letter_retry` was missing from `bot_console.NEEDS_BOT`,
+   so `miki-ops bot dead_letter_retry <id>` ran with `context.bot = None` and failed the job again.
+
+Related prior fixes still in force: straggler members must not cancel an in-flight send
+(`_delivering_albums`), and an orphaned uncaptioned member inherits its group's remembered decision.
 
 ## Seams (where components meet)
 

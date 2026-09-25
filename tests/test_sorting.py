@@ -2101,3 +2101,77 @@ def test_lookback_trigger_with_conflicting_tags_files_under_default_and_warns(
     tag_message.reply_text.assert_awaited_once()
     warning = tag_message.reply_text.await_args.args[0]
     assert "#japan" in warning and "#codes" in warning
+
+
+def test_album_uploads_are_serialised_across_pending_albums(database_connection) -> None:
+    """Regression: a restart replays the whole polling backlog in one
+    ``getUpdates``, so every buffered album's debounce expires in the same
+    second. Firing those uploads concurrently saturated the link and returned
+    them all as ``outcome_unknown``, stranding the members.
+    """
+
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    settings = _settings()
+    # Long enough that every album is queued before any debounce expires, so all
+    # four timers really do fire together (a short delay lets the buffering loop
+    # itself stagger them and the overlap never happens).
+    settings.album_flush_delay_seconds = 0.4
+    settings.album_max_wait_seconds = 30.0
+    service = SortingService(
+        settings,
+        repositories,
+        SimpleNamespace(index_copy=Mock(return_value=True)),
+    )
+
+    in_flight = 0
+    peak_in_flight = 0
+    next_message_id = iter(range(200, 400))
+
+    async def tracked_send_media_group(**kwargs):
+        nonlocal in_flight, peak_in_flight
+        in_flight += 1
+        peak_in_flight = max(peak_in_flight, in_flight)
+        try:
+            # Slower than the spread in arrival times, so without the gate the
+            # four uploads genuinely overlap.
+            await asyncio.sleep(0.15)
+            return [SimpleNamespace(message_id=next(next_message_id)) for _ in kwargs["media"]]
+        finally:
+            in_flight -= 1
+
+    bot = SimpleNamespace(
+        id=50,
+        send_media_group=AsyncMock(side_effect=tracked_send_media_group),
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=999)),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+
+    async def run() -> None:
+        message_id = 20
+        for album in range(4):
+            for position in range(2):
+                await service.handle_update(
+                    SimpleNamespace(
+                        effective_message=_message(
+                            "#Japan" if position == 0 else "",
+                            message_id=message_id,
+                            media_group_id=f"backlog-{album}",
+                        ),
+                        effective_chat=chat,
+                    ),
+                    context,
+                )
+                message_id += 1
+        # All four debounce timers expire together, as they do after a restart.
+        await asyncio.sleep(1.4)
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run())
+
+    assert peak_in_flight == 1
+    assert bot.send_media_group.await_count == 4
+    for source_message_id in range(20, 28):
+        assert repositories.get_delivery(-100, source_message_id, -200, 9).status == "sent"

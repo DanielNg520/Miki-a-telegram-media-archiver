@@ -72,6 +72,19 @@ def test_linux_install_writes_systemd_unit(tmp_path, monkeypatch) -> None:
     assert str(logdir / "miki.out.log") in text    # redirects to the log
     assert "Restart=on-failure" in text            # crash-restart
 
+    backfill_service_path = unitdir / service.BACKFILL_SERVICE_UNIT
+    assert backfill_service_path.exists()
+    backtext = backfill_service_path.read_text(encoding="utf-8")
+    assert "Type=oneshot" in backtext
+    assert "miki-burner backfill" in backtext
+
+    backfill_timer_path = unitdir / service.BACKFILL_TIMER_UNIT
+    assert backfill_timer_path.exists()
+    timetext = backfill_timer_path.read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 04:00:00" in timetext
+    assert "Persistent=true" in timetext
+    assert "OnUnitActiveSec" not in timetext
+
 
 def test_linux_install_without_program_fails(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(service, "LOG_DIR", tmp_path / "log")
@@ -95,3 +108,30 @@ def test_unsupported_platform_is_reported(monkeypatch) -> None:
     result = service.install(Path("."))
     assert result.code == 2
     assert "not implemented" in result.messages[0]
+
+def test_linux_uninstall_removes_backfill_timer_and_service(tmp_path, monkeypatch) -> None:
+    # Stub _linux_install and then uninstall to ensure timer and service files are removed
+    logdir = tmp_path / "log"
+    unitdir = tmp_path / "systemd"
+    monkeypatch.setattr(service, "LOG_DIR", logdir)
+    monkeypatch.setattr(service, "SYSTEMD_USER_DIR", unitdir)
+    program = tmp_path / "venv" / "bin" / "miki-sorter"
+    monkeypatch.setattr(service, "resolve_program", lambda: str(program))
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(
+        service, "_systemctl", lambda *args: _fake_completed(0, "", "")
+    )
+
+    workdir = tmp_path / "project"
+    # Run install to create files
+    result_install = service._linux_install(workdir)
+    assert result_install.code == 0
+
+    # Now uninstall
+    monkeypatch.setattr(service, "_systemctl", lambda *args: _fake_completed(0, "", ""))
+    result_uninstall = service._linux_uninstall()
+    assert result_uninstall.code == 0
+    backfill_service_path = unitdir / service.BACKFILL_SERVICE_UNIT
+    backfill_timer_path = unitdir / service.BACKFILL_TIMER_UNIT
+    assert not backfill_service_path.exists()
+    assert not backfill_timer_path.exists()

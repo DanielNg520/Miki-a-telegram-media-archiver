@@ -82,3 +82,12 @@ def test_run_command_unknown_is_reported(tmp_path) -> None:
         storage.close()
     assert not result.ok
     assert "Unknown command" in result.output
+def test_commands_that_deliver_messages_open_a_bot() -> None:
+    """Regression: dead_letter_retry re-drives the job through copy_message.
+
+    Without a real Bot it failed with "'NoneType' object has no attribute
+    'copy_message'" and marked the job failed a second time, so the operator's
+    only manual recovery path silently made things worse.
+    """
+
+    assert "dead_letter_retry" in NEEDS_BOT

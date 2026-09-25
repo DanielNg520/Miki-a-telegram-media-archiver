@@ -861,7 +861,20 @@ class SqliteRepositories:
             raise ValueError("match mode must be all or any")
         if limit < 1:
             raise ValueError("search limit must be positive")
-        placeholders = ",".join("?" for _ in normalized)
+        keyword_rows: list[str] = []
+        keyword_parameters: list[object] = []
+        for index, keyword in enumerate(normalized, start=1):
+            keyword_rows.append(
+                f"SELECT {index} AS ordinal, ? AS keyword, ? AS keyword_hyphen_free"
+            )
+            keyword_parameters.extend((keyword, keyword.replace("-", "") or "\x00"))
+        keywords_relation = " UNION ALL ".join(keyword_rows)
+        match_condition = (
+            "post_tokens.normalized_value = q.keyword "
+            "OR REPLACE(post_tokens.normalized_value, '-', '') = q.keyword_hyphen_free "
+            "OR (post_tokens.kind = 'code' AND LENGTH(q.keyword_hyphen_free) >= 4 "
+            "AND REPLACE(post_tokens.normalized_value, '-', '') LIKE q.keyword_hyphen_free || '%')"
+        )
         comparison = f"= {len(normalized)}" if match_mode == "all" else ">= 1"
         rows = self._connection.execute(
             f"""
@@ -869,14 +882,20 @@ class SqliteRepositories:
                 SELECT posts.logical_post_key,
                        MAX(COALESCE(posts.message_created_at, posts.created_at)) AS group_time,
                        MAX(CASE WHEN posts.media_type = 'video' THEN 1 ELSE 0 END) AS has_video,
-                       COUNT(DISTINCT post_tokens.normalized_value) AS matched_count
+                       COUNT(DISTINCT CASE
+                           WHEN {match_condition} THEN q.ordinal
+                       END) AS matched_count
                 FROM posts
                 JOIN post_tokens ON post_tokens.post_id = posts.id
+                JOIN (
+                    {keywords_relation}
+                ) AS q ON (
+                    {match_condition}
+                )
                 WHERE posts.source_chat_id = ?
                   AND posts.source_thread_id = ?
                   AND posts.is_available = 1
                   AND posts.media_type != 'document'
-                  AND post_tokens.normalized_value IN ({placeholders})
                 GROUP BY posts.logical_post_key
                 HAVING matched_count {comparison}
             ),
@@ -904,9 +923,9 @@ class SqliteRepositories:
                      posts.source_message_id ASC
             """,
             (
+                *keyword_parameters,
                 source_chat_id,
                 source_thread_id,
-                *normalized,
                 limit,
                 source_chat_id,
                 source_thread_id,
@@ -1337,6 +1356,79 @@ class SqliteRepositories:
             for row in rows
         ]
 
+    def exhaust_failed_job(self, job_id: int, error: str) -> None:
+        """Charge a retry attempt to a job that stayed failed.
+
+        The retry sweep bounds itself on ``attempts``, but a job that raises
+        before ``claim_job`` never increments it and would be re-selected every
+        sweep forever. Counting the attempt here is what terminates that loop.
+        """
+
+        with self._connection:
+            self._connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed', attempts = attempts + 1,
+                    last_error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (error, job_id),
+            )
+
+    def list_undelivered_failed_jobs(
+        self,
+        limit: int = 100,
+        *,
+        max_attempts: int = 5,
+        cooldown_minutes: int = 5,
+    ) -> list[JobRecord]:
+        """Failed jobs whose delivery demonstrably never landed.
+
+        ``list_pending_jobs`` only sees ``pending``, so a job failed by an
+        ``outcome_unknown`` album upload was never retried and its member was
+        stranded for good. The ``destination_message_id IS NULL`` test is what
+        makes a retry safe to attempt: a member Telegram actually accepted has
+        its id recorded and is excluded here. ``attempts`` caps the retries and
+        the cooldown keeps a permanently broken job from spinning every sweep.
+        """
+
+        if not 1 <= limit <= 1000:
+            raise ValueError("failed job limit must be between 1 and 1000")
+        if max_attempts < 1:
+            raise ValueError("max attempts must be at least 1")
+        if cooldown_minutes < 0:
+            raise ValueError("cooldown minutes must not be negative")
+        rows = self._connection.execute(
+            """
+            SELECT j.id, j.kind, j.status, j.idempotency_key, j.payload_json, j.attempts
+            FROM jobs j
+            WHERE j.status = 'failed'
+              AND j.attempts < ?
+              AND datetime(j.updated_at) <= datetime('now', ?)
+              AND datetime(j.available_at) <= datetime('now')
+              AND EXISTS (
+                    SELECT 1 FROM deliveries d
+                    WHERE d.job_id = j.id
+                      AND d.destination_message_id IS NULL
+                      AND d.status NOT IN ('sent', 'skipped')
+              )
+            ORDER BY j.updated_at, j.id
+            LIMIT ?
+            """,
+            (max_attempts, f"-{cooldown_minutes} minutes", limit),
+        ).fetchall()
+        return [
+            JobRecord(
+                id=row["id"],
+                kind=row["kind"],
+                status=row["status"],
+                idempotency_key=row["idempotency_key"],
+                payload=json.loads(row["payload_json"]),
+                attempts=row["attempts"],
+            )
+            for row in rows
+        ]
+
     def ensure_delivery(
         self,
         job_id: int,
@@ -1578,7 +1670,9 @@ class SqliteRepositories:
         error: str | None = None,
     ) -> None:
         if status not in {"completed", "failed", "cancelled"}:
-            raise ValueError("burner command must finish as completed, failed, or cancelled")
+            raise ValueError(
+                "burner command must finish as completed, failed, or cancelled"
+            )
         serialized = (
             json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
             if result is not None
@@ -1639,8 +1733,9 @@ class SqliteRepositories:
         The burner runs as a separate (often on-demand) process, so a crash mid-
         command would otherwise strand the row in 'running' forever. The always-on
         bot reaps these on a time threshold — generous enough not to race a
-        legitimately slow handler — flipping them to 'failed' so the result
-        reporter surfaces the outcome. Idempotent commands can then be re-issued.
+        legitimately slow handler — flipping them to 'failed' so the
+        result reporter surfaces the outcome. Idempotent commands can then be
+        re-issued.
         """
 
         if timeout_seconds < 1:
