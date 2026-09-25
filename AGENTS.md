@@ -82,7 +82,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Sender removal: strip @mentions and links (also text_link/mention entities) from captions before backup; keep `#JAV`/`#Asian` tags matched on the original text.
 - Verify the copied post carries no "forwarded from" header. Remove duplicate `_effective_source_thread_id` in favour of `LiveSettings`.
 - Tests: tag precedence, substring false positives, album, dedupe, failure swallowed, no sender/@mention in backup.
-- Handoff: specs `media_backup_chat_id`, `media_backup_tag_topics` (`jav:2,asian:3`, ordered). Sorting: `_strip_sender_identifiers`, `_copy_one_to_backup`, in-RAM `_backed_up` dedupe (5000), metric `media_backup_failures`, album backup inside `_album_send_gate`. `_effective_source_thread_id` removed; use `_live`. 439 tests green. Phase 1 code came from TriAPI DeepSeek dispatch (4 audit rounds): audits caught UTF-16 offsets, wrong chat id, wrong-member dedupe. Next: phase 2 or 3 or 4.
+- Handoff: specs `media_backup_chat_id`, `media_backup_tag_topics` (`jav:2,asian:3`, ordered). Sorting: `_strip_sender_identifiers`, `_copy_one_to_backup`, in-RAM `_backed_up` dedupe (5000), metric `media_backup_failures`, album backup inside `_album_send_gate`. `_effective_source_thread_id` removed; use `_live`. 439 tests green. Phase 1 code came from TriAPI DeepSeek dispatch (4 audit rounds): audits caught UTF-16 offsets, wrong chat id, wrong-member dedupe. Cleanup 2026-09-25 (`make verify` green, 440 tests): added `_win_uninstall`, fixed types, CVE bumps in `uv.lock`. Next: phase 2.
 
 ## Integration rules (audit 2026-09-25, binding for phases 2-6)
 - Run order: 2, 3, 4, 5, 6. Phase 3 needs the phase 2 benchmark; phase 5 needs 3 and 4; phase 6 needs 4.
@@ -93,9 +93,13 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Source topics live in `source_chat_id`; the `topics` table holds archive-chat topics only. Never touch archive topics from rotation.
 - Retrieval copies from archive-chat posts (`index_copy`), so deleting closed source topics cannot break requests.
 - Admin checks reuse `Management._is_admin`; audit rows reuse `_audit`. Do not add parallel permission or audit code.
+- Dispatch recipe: write the prompt to a scratchpad file, then from `~/Documents/Coding/TriAPI/rebuild` run `python3 scripts/call_deepseek.py --prompt-file F --system-file RULES.md`.
+- Prompts quote target code verbatim, state one function per call, and ask for code blocks only. Reject and redispatch on any defect; never patch silently.
+- Use quoted heredocs (`<<'E'`) for prompt files; unquoted ones let the shell eat backticks. Ignore the harmless `oh-my-llama` stderr lines.
+- Tests are dispatched too; hand edits are limited to wiring, imports, types, and one-token test fixes, and are reported to the user.
 - Dispatch prompts state behaviour, not code. Audit every reply: past defects were UTF-16 offsets, wrong chat id, wrong-member bookkeeping.
 
-## Phase 2 — Index/database build optimization [ ] TODO
+## Phase 2 — Index/database build optimization [ ] TODO (NEXT)
 - Needs: phase 0. Files: `indexing.py`, `repositories.py`, `storage.py`, `burner_backfill.py`, new benchmark script.
 - Extends: `MessageIndexer.index`, `SqliteRepositories.upsert_post`, `Storage.open`. Nothing new to build except the benchmark.
 - Step 1: benchmark 20k synthetic posts through `MessageIndexer.index`; record before numbers here. Keep only if it stays useful.
