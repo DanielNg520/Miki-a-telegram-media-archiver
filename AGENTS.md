@@ -112,6 +112,9 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - `PRAGMA synchronous=NORMAL` in `Storage.open` is global: a power loss can lose the last commit, never corrupt. Accept for phases 3-4.
 - Checkpoint `min_id` after commit only when bulk exists. Add `PRAGMA optimize` after bulk runs.
 - Gate: `test_indexing`, `test_retrieval`, `test_recovery`, `test_burner_backfill` pass unchanged. Record after numbers here.
+- Step 1 DONE: `scripts/bench_indexing.py` (TriAPI DeepSeek, 3 rounds: audits caught non-media messages, invented private attribute). Run `TMPDIR=~/.cache/bench python scripts/bench_indexing.py --posts 20000 --mappings 50 --reindex`. `/tmp` is tmpfs; hides fsync cost.
+- BEFORE (20k posts, btrfs): 0 mappings 348 posts/s first, 352 reindex. 50 mappings 328 / 329. `list_mappings` called once per post (20000). Cost is per-post commit plus fsync.
+- Next: measure one change at a time: cache `list_mappings`, then bulk `_tx()` batching, against these numbers.
 - Handoff:
 
 ## Phase 3 — Shared persisted media counter [ ] TODO
