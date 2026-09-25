@@ -86,8 +86,8 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 
 ## Integration rules (audit 2026-09-25, binding for phases 2-6)
 - Run order: 2, 3, 4, 5, 6. Phase 3 needs the phase 2 benchmark; phase 5 needs 3 and 4; phase 6 needs 4.
-- Baseline `make verify` is red (4 ruff, 21 mypy in `service.py`, `burner.py`, `ops.py`, `test_service.py`). Gate each phase on `make test` plus ruff/mypy clean on touched files only.
-- Never run `ruff format` repo-wide; format only touched files. Phase 1 reverted an accidental repo-wide reformat.
+- Baseline `make verify` is green (cleanup 2026-09-25). Each phase must keep it green: lint, format, mypy, bandit, pip-audit, package.
+- Format only touched files with `ruff format <files>`; keep unrelated diffs out. After `uv sync` use `--all-extras` or dev tools vanish.
 - Each phase lands: repo protocol methods, `main.py` wiring, `docs/codebase-map.md` entry, this file, tests. No half-wired service.
 - New timed work is one JobQueue job via the `make_tick_job` pattern. Nothing awaits inside the sorting hot path.
 - Source topics live in `source_chat_id`; the `topics` table holds archive-chat topics only. Never touch archive topics from rotation.
