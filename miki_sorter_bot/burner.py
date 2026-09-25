@@ -15,6 +15,7 @@ Two pieces live here:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import signal
 import threading
@@ -22,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -262,7 +264,7 @@ def _handle_backfill(
     jitter = payload.get("jitter")
     jitter = float(jitter) if isinstance(jitter, (int, float)) else DEFAULT_JITTER_SECONDS
 
-    common = dict(
+    common: dict[str, Any] = dict(
         chat_id=chat_id,
         limit=limit if limit else None,
         max_minutes=max_minutes if max_minutes else None,
@@ -472,7 +474,7 @@ def _cli_backfill(
     jitter: float,
     use_takeout: bool = True,
     loop: bool = False,
-    cli_args: "argparse.Namespace | None" = None,
+    cli_args: argparse.Namespace | None = None,
 ) -> None:
     from miki_sorter_bot.burner_backfill import (
         DEFAULT_DEEP_SCAN_LIMIT,
@@ -487,6 +489,8 @@ def _cli_backfill(
         if deep and topic_id is not None:
             print("--deep fills all archive topics; ignoring the single topic id.")
         if loop:
+            if cli_args is None:
+                raise ValueError("--loop requires parsed CLI arguments")
             if topic_id is not None and not deep:
                 print("--loop sweeps all archive topics; ignoring the single topic id.")
             run_backfill_loop_cli(

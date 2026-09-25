@@ -76,7 +76,7 @@ class InstanceLock:
         # two processes lock disjoint ranges and never conflict.
         handle.seek(_LOCK_OFFSET)
         try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
         except OSError:
             return False
         finally:
@@ -89,7 +89,7 @@ class InstanceLock:
         else:
             try:
                 handle.seek(_LOCK_OFFSET)  # unlock the same range we locked
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
             except OSError:
                 pass
 

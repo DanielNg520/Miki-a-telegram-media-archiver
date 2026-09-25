@@ -54,6 +54,12 @@ def _err(*messages: str) -> Result:
     return Result(1, list(messages))
 
 
+def _as_text(value: bytes | str | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
 def _run(args: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
     """Run a command with a bounded timeout so a stuck helper can't hang the CLI
     (or a health-check/verification client) indefinitely."""
@@ -63,8 +69,8 @@ def _run(args: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess
         return subprocess.CompletedProcess(
             args,
             124,
-            stdout=error.stdout or "",
-            stderr=(error.stderr or "") + "\nmiki: command timed out",
+            stdout=_as_text(error.stdout),
+            stderr=_as_text(error.stderr) + "\nmiki: command timed out",
         )
 
 
@@ -277,6 +283,15 @@ def _win_restart() -> Result:
     return Result(started.code, messages + started.messages)
 
 
+def _win_uninstall() -> Result:
+    messages = list(_win_unload().messages)
+    for path in (_win_startup_vbs(), _win_launcher_bat()):
+        if path.exists():
+            path.unlink()
+            messages.append(f"miki: removed {path}")
+    return _ok(*messages)
+
+
 def _win_pid() -> int | None:
     try:
         out = _run(
@@ -354,7 +369,7 @@ StandardError=append:{log}
 
 
 def _backfill_timer_text() -> str:
-    return f"""[Unit]
+    return """[Unit]
 Description=Run the Miki sorter bot backfill periodically
 
 [Timer]

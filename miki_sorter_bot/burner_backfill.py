@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -837,7 +838,7 @@ def run_backfill_loop(
     deep: bool = False,
     deep_scan_limit: int = DEFAULT_DEEP_SCAN_LIMIT,
     on_event: Callable[[str], None] = lambda _message: None,
-    stop_event: object | None = None,
+    stop_event: threading.Event | None = None,
 ) -> BackfillLoopOutcome:
     """Continuously backfill in small cycles until finished — the leave-it-running
     model. One client/takeout session is held for the whole loop (re-opening one

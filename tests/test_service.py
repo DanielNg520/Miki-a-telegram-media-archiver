@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from miki_sorter_bot import service
 
 
@@ -135,3 +133,26 @@ def test_linux_uninstall_removes_backfill_timer_and_service(tmp_path, monkeypatc
     backfill_timer_path = unitdir / service.BACKFILL_TIMER_UNIT
     assert not backfill_service_path.exists()
     assert not backfill_timer_path.exists()
+
+
+def test_win_uninstall_removes_startup_and_launcher(tmp_path, monkeypatch):
+    appdata = tmp_path / "AppData" / "Roaming"
+    localappdata = tmp_path / "AppData" / "Local"
+    appdata.mkdir(parents=True)
+    localappdata.mkdir(parents=True)
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setenv("LOCALAPPDATA", str(localappdata))
+    monkeypatch.setattr(service, "LOG_DIR", tmp_path / "log")
+    monkeypatch.setattr(service, "resolve_program", lambda: tmp_path / "program")
+
+    service._win_install(tmp_path / "workdir")
+    assert service._win_startup_vbs().exists() and service._win_launcher_bat().exists()
+    monkeypatch.setattr(service, "_win_unload", lambda: service._ok("miki: not running"))
+
+    result = service._win_uninstall()
+    assert result.code == 0
+    assert not service._win_startup_vbs().exists()
+    assert not service._win_launcher_bat().exists()
+
+    result_second = service._win_uninstall()
+    assert result_second.code == 0
