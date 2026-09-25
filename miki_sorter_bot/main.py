@@ -29,6 +29,7 @@ from miki_sorter_bot.integrations import IntegrationService
 from miki_sorter_bot.instance_lock import AlreadyRunningError, InstanceLock
 from miki_sorter_bot.management import ManagementCommands
 from miki_sorter_bot.periodic_notice import PeriodicNoticeService, make_tick_job
+from miki_sorter_bot.topic_activity import TopicActivity
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.retrieval import RetrievalService
@@ -124,7 +125,8 @@ def _run(settings: Settings) -> None:
     )
     live_settings = LiveSettings(settings, repositories)
     indexing = IndexingService(settings, repositories)
-    notice = PeriodicNoticeService(settings, repositories, live_settings)
+    activity = TopicActivity(repositories, live_settings)
+    notice = PeriodicNoticeService(settings, repositories, live_settings, activity=activity)
     sorting = SortingService(
         settings,
         repositories,
@@ -132,6 +134,7 @@ def _run(settings: Settings) -> None:
         delivery_executor,
         live_settings=live_settings,
         notice=notice,
+        activity=activity,
     )
     retrieval = RetrievalService(
         settings, repositories, delivery_executor, live_settings=live_settings

@@ -30,6 +30,7 @@ from miki_sorter_bot.indexing import (
 )
 from miki_sorter_bot.lookback import CapturedMedia, RecentMediaBuffer
 from miki_sorter_bot.periodic_notice import PeriodicNoticeService
+from miki_sorter_bot.topic_activity import TopicActivity
 from miki_sorter_bot.repositories import RouteMappingRecord, SqliteRepositories, TopicRecord
 from miki_sorter_bot.reliability import DeliveryExecutor, RateLimiter, RetryPolicy, classify_error
 from miki_sorter_bot.settings_registry import LiveSettings
@@ -116,11 +117,13 @@ class SortingService:
         delivery_executor: DeliveryExecutor | None = None,
         live_settings: LiveSettings | None = None,
         notice: "PeriodicNoticeService | None" = None,
+        activity: "TopicActivity | None" = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
         self._indexing = indexing
         self._notice = notice
+        self._activity = activity
         self._delivery_executor = delivery_executor or DeliveryExecutor(
             retry_policy=RetryPolicy(),
             rate_limiter=RateLimiter(1000),
@@ -365,7 +368,7 @@ class SortingService:
         # gate below, so notices can target any source topic (not only the one
         # Miki sorts). Skip edits so a re-edited post is not double-counted.
         if (
-            self._notice is not None
+            (self._notice is not None or self._activity is not None)
             and getattr(update, "edited_message", None) is None
             and chat.id == self._settings.source_chat_id
             and source_thread_id is not None
@@ -374,7 +377,15 @@ class SortingService:
             if getattr(sender, "id", None) != context.bot.id:
                 # An album's members share media_group_id and count once.
                 group_id = str(media_group_id) if media_group_id else None
-                self._notice.on_media(source_thread_id, context, group_id=group_id)
+                counted = (
+                    self._activity.record(source_thread_id, group_id)
+                    if self._activity is not None
+                    else None
+                )
+                if self._notice is not None:
+                    self._notice.on_media(
+                        source_thread_id, context, group_id=group_id, counted=counted
+                    )
 
         forwarding_pair = self._forwarding_pair(chat.id, source_thread_id)
         is_primary_source = (

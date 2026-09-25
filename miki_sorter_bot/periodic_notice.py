@@ -18,7 +18,7 @@ Design notes:
   (:meth:`tick`). The only persistent state is the last message id per topic,
   kept in the runtime-settings KV so a restart can still clean up the previous
   notice.
-- **In-memory counters** reset to 0 on restart, mirroring look-back/albums.
+- **In-memory counters** reset to 0 on restart. Album dedup is shared via TopicActivity.
 - **Best-effort.** A failed delete (notice too old, already removed) is logged
   and never blocks posting the replacement.
 """
@@ -34,6 +34,7 @@ from typing import Any, Protocol
 
 from miki_sorter_bot.logging_config import set_correlation_id, reset_correlation_id
 from miki_sorter_bot.settings_registry import LiveSettings
+from miki_sorter_bot.topic_activity import TopicActivity
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,12 +47,6 @@ POST_DELAY_SECONDS = 5.0
 _LAST_MESSAGE_KEY = "periodic_notice_last_message_id"
 # Runtime-settings KV key holding the operator-authored notice body.
 TEXT_KEY = "periodic_notice_text"
-
-# An album (media group) arrives as several separate messages; we count it once.
-# Members of one album land within seconds, so a short remembering window with a
-# bounded size is enough to collapse them into a single "message with media".
-_GROUP_DEDUP_WINDOW_SECONDS = 300.0
-_GROUP_DEDUP_MAX = 128
 
 
 class RuntimeStore(Protocol):
@@ -72,8 +67,6 @@ class _TopicState:
     last_post_at: float = 0.0
     post_task: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # media_group_id -> last-seen time, so repeated album members count once.
-    recent_groups: dict[str, float] = field(default_factory=dict)
 
 
 class PeriodicNoticeService:
@@ -85,12 +78,14 @@ class PeriodicNoticeService:
         *,
         clock: Callable[[], float] = time.monotonic,
         post_delay_seconds: float = POST_DELAY_SECONDS,
+        activity: TopicActivity | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
         self._live = live_settings
         self._clock = clock
         self._post_delay = post_delay_seconds
+        self._activity = activity or TopicActivity(repositories, live_settings, clock=clock)
         self._state: dict[int, _TopicState] = {}
 
     # -- text (operator-authored, stored outside the typed registry) --------
@@ -101,7 +96,14 @@ class PeriodicNoticeService:
         self._repositories.set_runtime_setting(TEXT_KEY, text, user_id)
 
     # -- count trigger (hot path) -------------------------------------------
-    def on_media(self, topic_id: int, context: Any, group_id: str | None = None) -> None:
+    def on_media(
+        self,
+        topic_id: int,
+        context: Any,
+        group_id: str | None = None,
+        *,
+        counted: bool | None = None,
+    ) -> None:
         """Record one media *message* in ``topic_id`` and arm the count trigger.
 
         Called from the sorting hot path for every user media message observed
@@ -124,9 +126,12 @@ class PeriodicNoticeService:
             state = _TopicState(last_post_at=self._clock())
             self._state[topic_id] = state
 
+        if counted is None:
+            counted = self._activity.is_new_post(topic_id, group_id)
+
         # Album members after the first do not add to the count, but they still
         # push back the debounce below so the post waits for the album to finish.
-        if group_id is None or not self._already_counted_group(state, group_id):
+        if counted:
             state.count += 1
 
         threshold = self._live.notice_media_threshold()
@@ -137,27 +142,6 @@ class PeriodicNoticeService:
         if state.post_task is not None and not state.post_task.done():
             state.post_task.cancel()
         state.post_task = asyncio.ensure_future(self._post_after_delay(topic_id, context))
-
-    def _already_counted_group(self, state: _TopicState, group_id: str) -> bool:
-        """True if this album was seen recently; records it for next time.
-
-        Prunes entries older than the dedup window and caps the map size so a
-        long-lived, busy topic cannot accumulate group ids without bound.
-        """
-
-        now = self._clock()
-        recent = state.recent_groups
-        if recent:
-            stale = [g for g, seen in recent.items() if now - seen > _GROUP_DEDUP_WINDOW_SECONDS]
-            for g in stale:
-                del recent[g]
-        seen_before = group_id in recent
-        recent[group_id] = now
-        if len(recent) > _GROUP_DEDUP_MAX:
-            # Drop the oldest entries down to the cap.
-            for g in sorted(recent, key=recent.__getitem__)[: len(recent) - _GROUP_DEDUP_MAX]:
-                del recent[g]
-        return seen_before
 
     async def _post_after_delay(self, topic_id: int, context: Any) -> None:
         try:

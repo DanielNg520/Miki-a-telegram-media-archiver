@@ -28,7 +28,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Storage: `repositories.py`, `migrations.py`, `storage.py`. Reliability: `recovery.py`, `reliability.py`, `diagnostics.py`.
 - Notices: `periodic_notice.py`. Burner account: `burner*.py`. Serving: `main.py`, `health_server.py`, `webhook_supervisor.py`.
 - Tooling: `scripts/bench_indexing.py` (indexing benchmark, outside `make verify`).
-- New files planned below: `rotation.py` (phase 5), `topic_activity.py` (phase 3), `forward_mute.py` (phase 6).
+- Notice counter: `topic_activity.py` (album dedup, persisted rotation count). Planned: `rotation.py` (phase 5), `forward_mute.py` (phase 6).
 
 ---
 
@@ -121,7 +121,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Not pursued (unmeasured, plan says drop): `get_post` re-read, token-set skip, `PRAGMA optimize`, `min_id` checkpoint.
 - Handoff: commits e0eea02 (benchmark), 42ac7a2 (mapping cache), then the pragma commit. 442 tests, `make verify` green. Benchmark is `scripts/bench_indexing.py`. Phase 3 can use it for write cost: ~5300 posts/s means one persisted counter row per post is cheap. Optional follow-up: burner batch flush (26k posts/s). Next: phase 3.
 
-## Phase 3 — Shared persisted media counter [ ] TODO (NEXT)
+## Phase 3 — Shared persisted media counter [x] DONE
 - Needs: phase 2 (benchmark for write cost). Files: new `topic_activity.py`, `periodic_notice.py`, `sorting.py`, `settings_registry.py`.
 - Extends: the count and album-dedup logic already in `PeriodicNoticeService.on_media`. Move it, do not copy it.
 - `TopicActivity.record(topic_id, group_id) -> bool` returns whether this post counted. It owns the shared album dedup window.
@@ -132,9 +132,9 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - That self-heals `/source_set` and rotation with no change to `management.py`. Cache the count in RAM, load once, write once per counted post.
 - Persistence failure is logged and skipped; it never breaks sorting.
 - Tests: `tests/test_periodic_notice.py` unchanged and green, restart-survives-count, album-counts-once, stale-thread-reads-zero, notices-disabled-still-counts.
-- Handoff:
+- Handoff: `topic_activity.py` `TopicActivity` (`is_new_post`, `record`, `rotation_count`, `reset_rotation`), key `rotation_media_count`=`<thread>:<n>`. Sorting calls `record` then `notice.on_media(..., counted=)`; notice falls back to own instance. 452 tests, `make verify` green. DeepSeek defect: invented `repositories.runtime_settings` (hand-fixed), wrong test import (hand-fixed). No sorting-level notices-disabled test; structure guarantees it. Next: phase 4.
 
-## Phase 4 — Timed message deletion queue and 24h request cleanup [ ] TODO
+## Phase 4 — Timed message deletion queue and 24h request cleanup [ ] TODO (NEXT)
 - Needs: phase 0. Files: `migrations.py`, `repositories.py`, `retrieval.py`, `main.py`, `settings_registry.py`, `docs/codebase-map.md`.
 - Extends: `RetrievalService` sends, `update_retrieval_item(destination_message_id)`, the JobQueue tick pattern. New table is genuinely new.
 - Migration: `scheduled_deletions(chat_id, message_id, delete_at, PRIMARY KEY(chat_id, message_id))` plus index on `delete_at`.
