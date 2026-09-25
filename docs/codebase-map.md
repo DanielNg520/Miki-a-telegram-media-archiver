@@ -13,7 +13,8 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | `main.py` | Composition root. Builds the PTB `Application`, wires handlers, schedules the repeating/daily jobs, and runs polling or webhook mode. |
 | `sorting.py` | `SortingService` — eligibility, route resolution/precedence, album buffering + flush timers, durable idempotent delivery. |
 | `routing.py` | `Route` value type and route matching primitives. |
-| `indexing.py` | `MessageIndexer` (duck-typed message → indexed post + tokens), `IndexingService`, the deterministic token `extract_search_tokens`, and `/reindex`. |
+| `indexing.py` | `MessageIndexer` (duck-typed message → indexed post + tokens), `IndexingService`, the deterministic token `extract_search_tokens`, and `/reindex`. `MessageIndexer(cache_mappings=True)` caches mappings per instance; only burner crawls enable it. |
+| `scripts/bench_indexing.py` | Standalone indexing benchmark (not packaged, not in `make verify`). Run with `TMPDIR` on a real disk, since `/tmp` may be tmpfs. |
 | `lookback.py` | Short-lived per-topic buffer of recent uncaptioned media, claimable by a later hashtag-only message. |
 | `retrieval.py` | `#request` parsing/validation and `RetrievalService` — search, batched album delivery, idempotent per-item records. |
 

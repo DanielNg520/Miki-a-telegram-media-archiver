@@ -27,6 +27,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Config: `config.py`, `settings_registry.py`. Admin: `management.py`, `ops.py`, `bot_console.py`, `operations.py`.
 - Storage: `repositories.py`, `migrations.py`, `storage.py`. Reliability: `recovery.py`, `reliability.py`, `diagnostics.py`.
 - Notices: `periodic_notice.py`. Burner account: `burner*.py`. Serving: `main.py`, `health_server.py`, `webhook_supervisor.py`.
+- Tooling: `scripts/bench_indexing.py` (indexing benchmark, outside `make verify`).
 - New files planned below: `rotation.py` (phase 5), `topic_activity.py` (phase 3), `forward_mute.py` (phase 6).
 
 ---
@@ -115,6 +116,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Step 1 DONE: `scripts/bench_indexing.py` (TriAPI DeepSeek, 3 rounds: audits caught non-media messages, invented private attribute). Run `TMPDIR=~/.cache/bench python scripts/bench_indexing.py --posts 20000 --mappings 50 --reindex`. `/tmp` is tmpfs; hides fsync cost.
 - BEFORE (20k posts, btrfs): 0 mappings 348 posts/s first, 352 reindex. 50 mappings 328 / 329. `list_mappings` called once per post (20000). Cost is per-post commit plus fsync.
 - Step 2 DONE: `MessageIndexer(cache_mappings=True)` (opt-in, burner crawls only; instance lifetime is the invalidation, no invalidate method). 328 to 347 posts/s (+6%), `list_mappings` calls 20000 to 1. Bench flag `--cache-mappings`.
+- Audit 2026-09-25: clean. Bulk `_tx()` and `PRAGMA optimize` plan bullets above are superseded by Step 3. Cache dict fills even when caching is off (harmless).
 - Step 3 DONE: `PRAGMA synchronous=NORMAL` in `Storage.open` (main connection only): 347 to 5294 posts/s (~15x). Bulk `transaction()` reached 26k posts/s (batch 100) but was reverted: unused code, and burner batching needs buffering so no write lock spans Telegram waits.
 - Not pursued (unmeasured, plan says drop): `get_post` re-read, token-set skip, `PRAGMA optimize`, `min_id` checkpoint.
 - Handoff: commits e0eea02 (benchmark), 42ac7a2 (mapping cache), then the pragma commit. 442 tests, `make verify` green. Benchmark is `scripts/bench_indexing.py`. Phase 3 can use it for write cost: ~5300 posts/s means one persisted counter row per post is cheap. Optional follow-up: burner batch flush (26k posts/s). Next: phase 3.
