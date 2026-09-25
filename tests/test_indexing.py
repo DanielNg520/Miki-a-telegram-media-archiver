@@ -233,3 +233,46 @@ def test_extract_search_tokens_hyphenated_code_still_extracts() -> None:
         t.kind == "code" and t.value == "KEA-022" and t.normalized_value == "kea-022"
         for t in result.tokens
     )
+
+
+def test_index_calls_list_mappings_per_message_without_cache(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repositories, bot_id=99)
+
+    call_count = 0
+    original_list_mappings = repositories.list_mappings
+
+    def counting_list_mappings(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_list_mappings(*args, **kwargs)
+
+    repositories.list_mappings = counting_list_mappings
+
+    assert indexer.index(_message(12), 1)
+    assert indexer.index(_message(13), 1)
+    assert indexer.index(_message(14), 1)
+
+    assert call_count == 3
+
+
+def test_index_caches_list_mappings_when_enabled(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    indexer = MessageIndexer(repositories, bot_id=99, cache_mappings=True)
+
+    call_count = 0
+    original_list_mappings = repositories.list_mappings
+
+    def counting_list_mappings(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_list_mappings(*args, **kwargs)
+
+    repositories.list_mappings = counting_list_mappings
+
+    assert indexer.index(_message(12), 1)
+    assert indexer.index(_message(13), 1)
+    assert indexer.index(_message(14), 1)
+    assert indexer.index(_message(15), 2)
+
+    assert call_count == 2

@@ -75,6 +75,7 @@ def main() -> None:
     parser.add_argument("--posts", type=int, default=20000)
     parser.add_argument("--mappings", type=int, default=0)
     parser.add_argument("--reindex", action="store_true")
+    parser.add_argument("--cache-mappings", action="store_true")
     args = parser.parse_args()
 
     messages = build_messages(args.posts)
@@ -104,7 +105,7 @@ def main() -> None:
 
         repositories.list_mappings = counted_list_mappings
 
-        indexer = MessageIndexer(repositories, bot_id=1)
+        indexer = MessageIndexer(repositories, bot_id=1, cache_mappings=args.cache_mappings)
 
         def run_pass(label: str) -> None:
             nonlocal list_mappings_calls

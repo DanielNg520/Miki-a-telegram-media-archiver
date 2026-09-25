@@ -190,7 +190,7 @@ def backfill_topic(
     the next run pick up exactly where this one left off.
     """
 
-    indexer = MessageIndexer(repositories, bot_id)
+    indexer = MessageIndexer(repositories, bot_id, cache_mappings=True)
     start_min_id = (
         min_id if min_id is not None else repositories.max_indexed_message_id(chat_id, topic_id)
     )
@@ -384,7 +384,7 @@ def deep_backfill_topic(
     ``max_seconds``, first hit wins. ``stop_reason='exhausted'`` means the bottom
     of the topic was reached (nothing older remains)."""
 
-    indexer = MessageIndexer(repositories, bot_id)
+    indexer = MessageIndexer(repositories, bot_id, cache_mappings=True)
     cursor = repositories.get_backfill_cursor(chat_id, topic_id)
     if cursor is not None and cursor.done:
         return BackfillOutcome(

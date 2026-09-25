@@ -84,9 +84,15 @@ def media_type(message: object) -> str | None:
 
 
 class MessageIndexer:
-    def __init__(self, repositories: SqliteRepositories, bot_id: int) -> None:
+    def __init__(
+        self, repositories: SqliteRepositories, bot_id: int, *, cache_mappings: bool = False
+    ) -> None:
         self._repositories = repositories
         self._bot_id = bot_id
+        self._cache_mappings = cache_mappings
+        self._mappings_cache: dict[
+            int, set[tuple[str, str]]
+        ] = {}  # cache lives only for this instance
 
     def index(
         self,
@@ -102,8 +108,12 @@ class MessageIndexer:
         if detected_media is None or thread_id is None:
             return False
         text = (getattr(message, "caption", None) or getattr(message, "text", None) or "").strip()
-        mappings = self._repositories.list_mappings(chat_id)
-        configured_values = {(item.kind, item.normalized_value) for item in mappings}
+        if not self._cache_mappings or chat_id not in self._mappings_cache:
+            mappings = self._repositories.list_mappings(chat_id)
+            self._mappings_cache[chat_id] = {
+                (item.kind, item.normalized_value) for item in mappings
+            }
+        configured_values = self._mappings_cache[chat_id]
         extraction = extract_search_tokens(text, configured_values)
         sender = getattr(message, "from_user", None)
         sender_id = getattr(sender, "id", None)
