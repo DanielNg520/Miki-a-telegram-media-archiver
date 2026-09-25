@@ -41,3 +41,4 @@ BACKFILL_PLAN.md
 *.swp
 .idea/
 .vscode/
+.codegraph/
