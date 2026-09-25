@@ -353,9 +353,7 @@ def test_backfill_all_topics_sweeps_every_active_topic(database_connection) -> N
     def factory_for(thread_id: int):
         return _history(histories[thread_id])
 
-    outcomes = backfill_all_topics(
-        repositories, settings, chat_id=-200, factory_for=factory_for
-    )
+    outcomes = backfill_all_topics(repositories, settings, chat_id=-200, factory_for=factory_for)
 
     assert [o.topic_id for o in outcomes] == [10, 20]  # ordered by topic name
     assert sum(o.indexed for o in outcomes) == 3
@@ -422,7 +420,8 @@ def test_backfill_and_report_formats_sweep(monkeypatch) -> None:
 
 def test_backfill_and_report_single_topic(monkeypatch) -> None:
     monkeypatch.setattr(
-        _bf, "run_backfill",
+        _bf,
+        "run_backfill",
         lambda *a, **k: BackfillOutcome(-200, 10, 3, 3, 12, 0, "exhausted"),
     )
     code, lines = _bf.backfill_and_report(_settings(), None, topic_id=10)
@@ -468,15 +467,18 @@ def test_use_takeout_threads_through_single_topic(monkeypatch) -> None:
 def test_loop_stops_when_all_topics_exhausted() -> None:
     # cycle 1 indexes some (limit-capped, more to do); cycle 2 indexes nothing and
     # every topic is exhausted -> caught up, loop stops.
-    cycles = iter([
-        [BackfillOutcome(-200, 10, 100, 100, 100, 0, "limit")],
-        [BackfillOutcome(-200, 10, 5, 0, 105, 100, "exhausted")],
-    ])
+    cycles = iter(
+        [
+            [BackfillOutcome(-200, 10, 100, 100, 100, 0, "limit")],
+            [BackfillOutcome(-200, 10, 5, 0, 105, 100, "exhausted")],
+        ]
+    )
     events: list[str] = []
     slept: list[float] = []
     outcome = _bf._drive_backfill_loop(
         lambda: next(cycles),
-        sleep_min=10, sleep_max=10,
+        sleep_min=10,
+        sleep_max=10,
         on_event=events.append,
         should_stop=lambda: False,
         wait=slept.append,
@@ -498,7 +500,8 @@ def test_loop_stops_on_stop_event() -> None:
 
     outcome = _bf._drive_backfill_loop(
         run_cycle,
-        sleep_min=10, sleep_max=10,
+        sleep_min=10,
+        sleep_max=10,
         on_event=lambda _m: None,
         should_stop=lambda: state["stop"],
         wait=lambda _s: None,
@@ -511,7 +514,8 @@ def test_loop_stops_on_stop_event() -> None:
 def test_loop_no_topics_is_done_immediately() -> None:
     outcome = _bf._drive_backfill_loop(
         lambda: [],
-        sleep_min=10, sleep_max=10,
+        sleep_min=10,
+        sleep_max=10,
         on_event=lambda _m: None,
         should_stop=lambda: False,
         wait=lambda _s: None,
@@ -566,8 +570,12 @@ def test_deep_backfill_resumes_from_cursor_without_reread(database_connection) -
     below = _below_history([_msg(i, media="photo") for i in range(90, 100)])  # 90..99
 
     first = deep_backfill_topic(
-        repositories, settings, chat_id=-200, topic_id=7,
-        history_below_factory=below, scan_limit=3,
+        repositories,
+        settings,
+        chat_id=-200,
+        topic_id=7,
+        history_below_factory=below,
+        scan_limit=3,
     )
     assert first.indexed == 3 and first.stop_reason == "scan_limit"
     cursor = repositories.get_backfill_cursor(-200, 7)
@@ -584,9 +592,7 @@ def test_deep_backfill_resumes_from_cursor_without_reread(database_connection) -
 def test_deep_backfill_done_topic_is_noop(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     settings = _settings()
-    repositories.save_backfill_cursor(
-        -200, 7, floor_message_id=5, done=True, scanned=10, indexed=4
-    )
+    repositories.save_backfill_cursor(-200, 7, floor_message_id=5, done=True, scanned=10, indexed=4)
     calls: list[int] = []
 
     def below(max_id: int):

@@ -181,8 +181,10 @@ def cmd_backfill(args: argparse.Namespace) -> int:
             if topics:
                 listing = ", ".join(f"{t.name} ({t.thread_id})" for t in topics)
                 scope = "deep-filling" if args.deep else "sweeping"
-                print(f"{scope.capitalize()} {len(topics)} archive topic(s) of chat "
-                      f"{chat_id}: {listing}")
+                print(
+                    f"{scope.capitalize()} {len(topics)} archive topic(s) of chat "
+                    f"{chat_id}: {listing}"
+                )
             else:
                 print(f"No active topics registered for archive chat {chat_id}.")
                 return 0
@@ -415,52 +417,77 @@ def _build_parser() -> argparse.ArgumentParser:
         "active archive topic (chat + topics come from config)",
     )
     backfill.add_argument(
-        "topic_id", type=int, nargs="?", default=None,
+        "topic_id",
+        type=int,
+        nargs="?",
+        default=None,
         help="archive topic (thread) id; omit to sweep all active archive topics",
     )
     backfill.add_argument(
         "--chat", type=int, default=None, help="chat id (default: ARCHIVE_CHAT_ID)"
     )
     backfill.add_argument(
-        "--limit", type=int, default=_bf.DEFAULT_LIMIT,
+        "--limit",
+        type=int,
+        default=_bf.DEFAULT_LIMIT,
         help=f"per-topic count cap (default {_bf.DEFAULT_LIMIT}; 0 disables it)",
     )
     backfill.add_argument(
-        "--max-minutes", dest="max_minutes", type=float, default=_bf.DEFAULT_MAX_MINUTES,
+        "--max-minutes",
+        dest="max_minutes",
+        type=float,
+        default=_bf.DEFAULT_MAX_MINUTES,
         help=f"time budget for the whole run (default {_bf.DEFAULT_MAX_MINUTES}; 0 disables it)",
     )
     backfill.add_argument(
-        "--jitter", type=float, default=_bf.DEFAULT_JITTER_SECONDS,
+        "--jitter",
+        type=float,
+        default=_bf.DEFAULT_JITTER_SECONDS,
         help=f"random extra seconds per inter-batch pause (default {_bf.DEFAULT_JITTER_SECONDS})",
     )
     backfill.add_argument(
-        "--no-takeout", dest="use_takeout", action="store_false",
+        "--no-takeout",
+        dest="use_takeout",
+        action="store_false",
         help="force a direct read instead of the safer Telegram takeout session",
     )
     backfill.add_argument(
-        "--loop", action="store_true",
+        "--loop",
+        action="store_true",
         help="run continuously in small cycles until caught up, then stop "
         "(leave-it-running mode); Ctrl-C stops and resumes from the checkpoint",
     )
     backfill.add_argument(
-        "--cycle-limit", dest="cycle_limit", type=int, default=_bf.DEFAULT_CYCLE_LIMIT,
+        "--cycle-limit",
+        dest="cycle_limit",
+        type=int,
+        default=_bf.DEFAULT_CYCLE_LIMIT,
         help=f"--loop: posts indexed per topic per cycle (default {_bf.DEFAULT_CYCLE_LIMIT})",
     )
     backfill.add_argument(
-        "--sleep-min", dest="sleep_min", type=float, default=_bf.DEFAULT_SLEEP_MIN_SECONDS,
+        "--sleep-min",
+        dest="sleep_min",
+        type=float,
+        default=_bf.DEFAULT_SLEEP_MIN_SECONDS,
         help=f"--loop: min seconds between cycles (default {_bf.DEFAULT_SLEEP_MIN_SECONDS:.0f})",
     )
     backfill.add_argument(
-        "--sleep-max", dest="sleep_max", type=float, default=_bf.DEFAULT_SLEEP_MAX_SECONDS,
+        "--sleep-max",
+        dest="sleep_max",
+        type=float,
+        default=_bf.DEFAULT_SLEEP_MAX_SECONDS,
         help=f"--loop: max seconds between cycles (default {_bf.DEFAULT_SLEEP_MAX_SECONDS:.0f})",
     )
     backfill.add_argument(
-        "--deep", action="store_true",
+        "--deep",
+        action="store_true",
         help="fill the PRE-Miki gap: crawl history BELOW the earliest indexed "
         "message (all topics). Pair with --loop for a slow 24/7 one-time fill",
     )
     backfill.add_argument(
-        "--deep-scan-limit", dest="deep_scan_limit", type=int,
+        "--deep-scan-limit",
+        dest="deep_scan_limit",
+        type=int,
         default=_bf.DEFAULT_DEEP_SCAN_LIMIT,
         help=f"--deep: max messages read per topic per pass (default "
         f"{_bf.DEFAULT_DEEP_SCAN_LIMIT})",
@@ -471,19 +498,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "`bot keyword_add JAV 日本`); `bot --list` to enumerate",
     )
     bot.add_argument("name", nargs="?", help="command name (omit or --list to list)")
-    bot.add_argument(
-        "args", nargs=argparse.REMAINDER, help="arguments passed to the command"
-    )
+    bot.add_argument("args", nargs=argparse.REMAINDER, help="arguments passed to the command")
     bot.add_argument("--list", action="store_true", help="list available commands")
     bot.add_argument(
-        "--chat", type=int, default=None,
+        "--chat",
+        type=int,
+        default=None,
         help="chat id context (default: SOURCE_CHAT_ID)",
     )
+    bot.add_argument("--thread", type=int, default=None, help="forum topic (thread) id context")
     bot.add_argument(
-        "--thread", type=int, default=None, help="forum topic (thread) id context"
-    )
-    bot.add_argument(
-        "--as", dest="as_user", type=int, default=None,
+        "--as",
+        dest="as_user",
+        type=int,
+        default=None,
         help="act as this user id (default: first ADMIN_USER_IDS)",
     )
     return parser

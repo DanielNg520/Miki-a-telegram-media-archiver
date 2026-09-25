@@ -92,6 +92,7 @@ def list_commands() -> list[str]:
 
 # ── synthetic Telegram objects (only the attributes the handlers read) ───────
 
+
 @dataclass(slots=True)
 class _FakeMessage:
     text: str

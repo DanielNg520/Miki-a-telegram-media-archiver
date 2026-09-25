@@ -1670,9 +1670,7 @@ class SqliteRepositories:
         error: str | None = None,
     ) -> None:
         if status not in {"completed", "failed", "cancelled"}:
-            raise ValueError(
-                "burner command must finish as completed, failed, or cancelled"
-            )
+            raise ValueError("burner command must finish as completed, failed, or cancelled")
         serialized = (
             json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
             if result is not None
@@ -1882,9 +1880,7 @@ class SqliteRepositories:
         ).fetchone()
         return int(row["min_id"]) if row and row["min_id"] is not None else 0
 
-    def get_backfill_cursor(
-        self, chat_id: int, thread_id: int
-    ) -> BackfillCursorRecord | None:
+    def get_backfill_cursor(self, chat_id: int, thread_id: int) -> BackfillCursorRecord | None:
         row = self._connection.execute(
             """
             SELECT floor_message_id, done, scanned, indexed

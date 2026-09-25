@@ -40,7 +40,16 @@ def _media(
 ) -> SimpleNamespace:
     fields = {
         name: None
-        for name in ("animation", "audio", "document", "photo", "sticker", "video", "video_note", "voice")
+        for name in (
+            "animation",
+            "audio",
+            "document",
+            "photo",
+            "sticker",
+            "video",
+            "video_note",
+            "voice",
+        )
     }
     fields[kind] = [object()] if kind == "photo" else object()
     return SimpleNamespace(
@@ -228,9 +237,7 @@ def test_search_prioritizes_videos_over_photos(database_connection) -> None:
     now = datetime(2026, 6, 13, tzinfo=UTC)
     # Photo is newer, but the video should still be delivered first.
     indexer.index(_media(1, "Tokyo photo", kind="photo", created_at=now), -200)
-    indexer.index(
-        _media(2, "Tokyo video", kind="video", created_at=now - timedelta(days=1)), -200
-    )
+    indexer.index(_media(2, "Tokyo video", kind="video", created_at=now - timedelta(days=1)), -200)
 
     results = repositories.search_posts(-200, 9, ("tokyo",), "any", 10)
 
@@ -527,13 +534,17 @@ def test_missing_source_is_marked_unavailable_and_removed_from_search(
     remaining = repositories.search_posts(-200, 9, ("tokyo",), "any", 10)
     assert all(post.source_message_id != 1 for post in remaining)
 
-def test_search_matches_hyphenated_code_query_against_unhyphenated_caption(database_connection) -> None:
+
+def test_search_matches_hyphenated_code_query_against_unhyphenated_caption(
+    database_connection,
+) -> None:
     repositories = SqliteRepositories(database_connection)
     _library(repositories)
     indexer = MessageIndexer(repositories, bot_id=99)
     indexer.index(_media(20, "Code KEA022 is great", created_at=datetime.now(tz=UTC)), -200)
     results = repositories.search_posts(-200, 9, ("kea-022",), "any", 10)
     assert any(post.source_message_id == 20 for post in results)
+
 
 def test_search_prefix_matches_code_token_with_four_char_query(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
@@ -543,6 +554,7 @@ def test_search_prefix_matches_code_token_with_four_char_query(database_connecti
     results = repositories.search_posts(-200, 9, ("coat",), "any", 10)
     assert any(post.source_message_id == 21 for post in results)
 
+
 def test_search_does_not_prefix_match_short_query(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _library(repositories)
@@ -550,5 +562,3 @@ def test_search_does_not_prefix_match_short_query(database_connection) -> None:
     indexer.index(_media(22, "ABC1234", created_at=datetime.now(tz=UTC)), -200)
     results = repositories.search_posts(-200, 9, ("abc",), "any", 10)
     assert all(post.source_message_id != 22 for post in results)
-
-

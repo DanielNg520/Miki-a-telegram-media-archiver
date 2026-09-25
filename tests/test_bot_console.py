@@ -47,9 +47,7 @@ def test_run_command_status_as_admin(tmp_path) -> None:
     storage = Storage(settings.database_path)
     repositories = storage.open()
     try:
-        result = run_command(
-            settings, repositories, storage, name="status", args=[]
-        )
+        result = run_command(settings, repositories, storage, name="status", args=[])
     finally:
         storage.close()
     assert result.ok
@@ -61,9 +59,7 @@ def test_run_command_rejects_non_admin(tmp_path) -> None:
     storage = Storage(settings.database_path)
     repositories = storage.open()
     try:
-        result = run_command(
-            settings, repositories, storage, name="status", args=[], user_id=999
-        )
+        result = run_command(settings, repositories, storage, name="status", args=[], user_id=999)
     finally:
         storage.close()
     # The handler runs but replies with the authorization refusal (same as the bot).
@@ -75,13 +71,13 @@ def test_run_command_unknown_is_reported(tmp_path) -> None:
     storage = Storage(settings.database_path)
     repositories = storage.open()
     try:
-        result = run_command(
-            settings, repositories, storage, name="nope", args=[]
-        )
+        result = run_command(settings, repositories, storage, name="nope", args=[])
     finally:
         storage.close()
     assert not result.ok
     assert "Unknown command" in result.output
+
+
 def test_commands_that_deliver_messages_open_a_bot() -> None:
     """Regression: dead_letter_retry re-drives the job through copy_message.
 

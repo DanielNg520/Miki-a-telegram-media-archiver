@@ -87,6 +87,7 @@ def resolve_program() -> str | None:
 
 # ── public API (platform dispatch) ──────────────────────────────────────────
 
+
 def install(workdir: Path) -> Result:
     if sys.platform == "darwin":
         return _mac_install(workdir)
@@ -145,8 +146,11 @@ def status() -> Result:
         installed = _win_startup_vbs().exists()
         return _ok(
             "miki: not running"
-            + ("  (autostart installed — starts at next logon)" if installed
-               else "  (autostart not installed — run `miki-ops install`)")
+            + (
+                "  (autostart installed — starts at next logon)"
+                if installed
+                else "  (autostart not installed — run `miki-ops install`)"
+            )
         )
     if sys.platform == "darwin":
         running = _mac_running()
@@ -154,9 +158,14 @@ def status() -> Result:
     if sys.platform.startswith("linux"):
         running = _linux_running()
         installed = _systemd_unit_path().exists()
-        note = "" if running else (
-            "  (autostart installed — starts at next logon)" if installed
-            else "  (autostart not installed — run `miki-ops install`)"
+        note = (
+            ""
+            if running
+            else (
+                "  (autostart installed — starts at next logon)"
+                if installed
+                else "  (autostart not installed — run `miki-ops install`)"
+            )
         )
         return _ok(f"miki: {'running' if running else 'not running'}{note}")
     return _unsupported()
@@ -183,6 +192,7 @@ def _unsupported() -> Result:
 
 
 # ── Windows: Startup-folder autostart + process control ─────────────────────
+
 
 def _win_app_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
@@ -218,16 +228,13 @@ def _win_install(workdir: Path) -> Result:
     # it with a hidden window so logon autostart shows no console.
     bat = _win_launcher_bat()
     bat.write_text(
-        "@echo off\r\n"
-        f'cd /d "{workdir}"\r\n'
-        f'"{program}" >> "{log}" 2>&1\r\n',
+        f'@echo off\r\ncd /d "{workdir}"\r\n"{program}" >> "{log}" 2>&1\r\n',
         encoding="utf-8",
     )
     startup = _win_startup_dir()
     startup.mkdir(parents=True, exist_ok=True)
     _win_startup_vbs().write_text(
-        'Set sh = CreateObject("WScript.Shell")\r\n'
-        f'sh.Run """{bat}""", 0, False\r\n',
+        f'Set sh = CreateObject("WScript.Shell")\r\nsh.Run """{bat}""", 0, False\r\n',
         encoding="utf-8",
     )
     return _ok(
@@ -310,6 +317,7 @@ def _win_pid() -> int | None:
 
 
 # ── Linux: systemd user service ─────────────────────────────────────────────
+
 
 def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
     return _run(["systemctl", "--user", *args])
@@ -409,16 +417,13 @@ def _linux_install(workdir: Path) -> Result:
         f"miki: wrote {backfill_timer} (service {backfill_service.name})",
     ]
     if enabled.returncode != 0:
-        messages.append(
-            f"miki: warning — could not enable autostart: {enabled.stderr.strip()}"
-        )
+        messages.append(f"miki: warning — could not enable autostart: {enabled.stderr.strip()}")
     else:
         messages.append("miki: enabled autostart at logon")
     timer_enabled = _systemctl("enable", BACKFILL_TIMER_UNIT)
     if timer_enabled.returncode != 0:
         messages.append(
-            "miki: warning — could not enable backfill timer: "
-            f"{timer_enabled.stderr.strip()}"
+            f"miki: warning — could not enable backfill timer: {timer_enabled.stderr.strip()}"
         )
     else:
         messages.append("miki: enabled periodic backfill timer")
@@ -482,6 +487,7 @@ def _linux_running() -> bool:
 
 # ── macOS: launchd LaunchAgent ──────────────────────────────────────────────
 
+
 def _plist_path() -> Path:
     return LAUNCH_AGENTS / f"{SERVICE_LABEL}.plist"
 
@@ -528,9 +534,7 @@ def _mac_unload() -> Result:
 
 def _mac_restart() -> Result:
     uid = _run(["/usr/bin/id", "-u"]).stdout.strip()
-    result = _run(
-        ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"]
-    )
+    result = _run(["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"])
     if result.returncode == 0:
         return _ok("miki: restarted")
     return _err(f"miki: restart failed - {result.stderr.strip()}")

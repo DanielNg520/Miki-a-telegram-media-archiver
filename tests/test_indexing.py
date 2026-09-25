@@ -207,6 +207,7 @@ def test_reindex_processes_only_bounded_outdated_rows(database_connection) -> No
     ]
     assert versions == [EXTRACTOR_VERSION, 0]
 
+
 def test_extract_search_tokens_drops_short_configured_keywords() -> None:
     result = extract_search_tokens(
         "some caption text a go",

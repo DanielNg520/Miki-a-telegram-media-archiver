@@ -516,10 +516,7 @@ def _cli_backfill(
             jitter=jitter,
             use_takeout=use_takeout,
             deep=deep,
-            deep_scan_limit=(
-                cli_args.deep_scan_limit if cli_args
-                else DEFAULT_DEEP_SCAN_LIMIT
-            ),
+            deep_scan_limit=(cli_args.deep_scan_limit if cli_args else DEFAULT_DEEP_SCAN_LIMIT),
         )
     finally:
         storage.close()

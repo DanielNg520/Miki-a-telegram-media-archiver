@@ -202,9 +202,7 @@ def backfill_topic(
     started_at = clock()
 
     def _result(reason: str) -> BackfillOutcome:
-        return BackfillOutcome(
-            chat_id, topic_id, scanned, indexed, cursor, start_min_id, reason
-        )
+        return BackfillOutcome(chat_id, topic_id, scanned, indexed, cursor, start_min_id, reason)
 
     def _over_time() -> bool:
         return max_seconds is not None and (clock() - started_at) >= max_seconds
@@ -390,7 +388,12 @@ def deep_backfill_topic(
     cursor = repositories.get_backfill_cursor(chat_id, topic_id)
     if cursor is not None and cursor.done:
         return BackfillOutcome(
-            chat_id, topic_id, 0, 0, cursor.floor_message_id, cursor.floor_message_id,
+            chat_id,
+            topic_id,
+            0,
+            0,
+            cursor.floor_message_id,
+            cursor.floor_message_id,
             "exhausted",
         )
     if cursor is not None:
@@ -659,20 +662,35 @@ def backfill_and_report(
 
     if deep:
         outcomes = run_deep_backfill_all(
-            settings, repositories, chat_id=chat_id, index_limit=limit,
-            scan_limit=deep_scan_limit, max_minutes=max_minutes, jitter=jitter,
+            settings,
+            repositories,
+            chat_id=chat_id,
+            index_limit=limit,
+            scan_limit=deep_scan_limit,
+            max_minutes=max_minutes,
+            jitter=jitter,
             use_takeout=use_takeout,
         )
     elif topic_id is None:
         outcomes = run_backfill_all(
-            settings, repositories, chat_id=chat_id, limit=limit,
-            max_minutes=max_minutes, jitter=jitter, use_takeout=use_takeout,
+            settings,
+            repositories,
+            chat_id=chat_id,
+            limit=limit,
+            max_minutes=max_minutes,
+            jitter=jitter,
+            use_takeout=use_takeout,
         )
     else:
         outcomes = [
             run_backfill(
-                settings, repositories, topic_id=topic_id, chat_id=chat_id,
-                limit=limit, max_minutes=max_minutes, jitter=jitter,
+                settings,
+                repositories,
+                topic_id=topic_id,
+                chat_id=chat_id,
+                limit=limit,
+                max_minutes=max_minutes,
+                jitter=jitter,
                 use_takeout=use_takeout,
             )
         ]
@@ -719,6 +737,7 @@ def run_backfill_all(
     target_chat = chat_id if chat_id is not None else settings.archive_chat_id
     max_seconds = max_minutes * 60.0 if max_minutes is not None else None
     with _connected_client(settings, use_takeout=use_takeout) as client:
+
         def factory_for(thread_id: int) -> HistoryFactory:
             return telethon_history_factory(client, target_chat, thread_id)
 
@@ -754,6 +773,7 @@ def run_deep_backfill_all(
     target_chat = chat_id if chat_id is not None else settings.archive_chat_id
     max_seconds = max_minutes * 60.0 if max_minutes is not None else None
     with _connected_client(settings, use_takeout=use_takeout) as client:
+
         def below_for(thread_id: int) -> BelowFactory:
             return telethon_history_below_factory(client, target_chat, thread_id)
 
@@ -810,8 +830,7 @@ def _drive_backfill_loop(
         # the loop keeps going.
         if all(o.stop_reason == "exhausted" for o in outcomes):
             on_event(
-                f"backfill complete — all topics finished "
-                f"(indexed {total} over {cycle} cycle(s))."
+                f"backfill complete — all topics finished (indexed {total} over {cycle} cycle(s))."
             )
             return BackfillLoopOutcome(cycle, total, True)
         if should_stop():
@@ -854,8 +873,10 @@ def run_backfill_loop(
     # Interruptible sleep: Event.wait returns early when set; plain sleep otherwise.
     wait = stop_event.wait if stop_event is not None else time.sleep
     with _connected_client(settings, use_takeout=use_takeout) as client:
+
         def run_cycle() -> list[BackfillOutcome]:
             if deep:
+
                 def below_for(thread_id: int) -> BelowFactory:
                     return telethon_history_below_factory(client, target_chat, thread_id)
 

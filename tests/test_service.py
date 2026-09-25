@@ -26,8 +26,8 @@ def test_win_install_writes_self_contained_launcher(tmp_path, monkeypatch) -> No
     assert vbs.exists() and bat.exists()
 
     bat_text = bat.read_text(encoding="utf-8")
-    assert str(workdir) in bat_text        # cd to the .env directory
-    assert str(program) in bat_text        # runs the resolved program
+    assert str(workdir) in bat_text  # cd to the .env directory
+    assert str(program) in bat_text  # runs the resolved program
     assert str(logdir / "miki.out.log") in bat_text  # redirects to the log
     assert str(bat) in vbs.read_text(encoding="utf-8")  # vbs launches the bat
 
@@ -54,9 +54,7 @@ def test_linux_install_writes_systemd_unit(tmp_path, monkeypatch) -> None:
     program = tmp_path / "venv" / "bin" / "miki-sorter"
     monkeypatch.setattr(service, "resolve_program", lambda: str(program))
     monkeypatch.setattr(service.shutil, "which", lambda _name: "/usr/bin/systemctl")
-    monkeypatch.setattr(
-        service, "_systemctl", lambda *args: _fake_completed(0, "", "")
-    )
+    monkeypatch.setattr(service, "_systemctl", lambda *args: _fake_completed(0, "", ""))
 
     workdir = tmp_path / "project"
     result = service._linux_install(workdir)
@@ -66,9 +64,9 @@ def test_linux_install_writes_systemd_unit(tmp_path, monkeypatch) -> None:
     assert unit.exists()
     text = unit.read_text(encoding="utf-8")
     assert f"WorkingDirectory={workdir}" in text  # cd to the .env directory
-    assert f"ExecStart={program}" in text          # runs the resolved program
-    assert str(logdir / "miki.out.log") in text    # redirects to the log
-    assert "Restart=on-failure" in text            # crash-restart
+    assert f"ExecStart={program}" in text  # runs the resolved program
+    assert str(logdir / "miki.out.log") in text  # redirects to the log
+    assert "Restart=on-failure" in text  # crash-restart
 
     backfill_service_path = unitdir / service.BACKFILL_SERVICE_UNIT
     assert backfill_service_path.exists()
@@ -107,6 +105,7 @@ def test_unsupported_platform_is_reported(monkeypatch) -> None:
     assert result.code == 2
     assert "not implemented" in result.messages[0]
 
+
 def test_linux_uninstall_removes_backfill_timer_and_service(tmp_path, monkeypatch) -> None:
     # Stub _linux_install and then uninstall to ensure timer and service files are removed
     logdir = tmp_path / "log"
@@ -116,9 +115,7 @@ def test_linux_uninstall_removes_backfill_timer_and_service(tmp_path, monkeypatc
     program = tmp_path / "venv" / "bin" / "miki-sorter"
     monkeypatch.setattr(service, "resolve_program", lambda: str(program))
     monkeypatch.setattr(service.shutil, "which", lambda _name: "/usr/bin/systemctl")
-    monkeypatch.setattr(
-        service, "_systemctl", lambda *args: _fake_completed(0, "", "")
-    )
+    monkeypatch.setattr(service, "_systemctl", lambda *args: _fake_completed(0, "", ""))
 
     workdir = tmp_path / "project"
     # Run install to create files

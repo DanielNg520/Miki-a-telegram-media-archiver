@@ -56,7 +56,11 @@ def extract_search_tokens(
         normalized_value = " ".join(configured_value.casefold().split())
         if kind == "hashtag":
             continue
-        if kind == "keyword" and len(normalized_value) >= 3 and contains_keyword(text, normalized_value):
+        if (
+            kind == "keyword"
+            and len(normalized_value) >= 3
+            and contains_keyword(text, normalized_value)
+        ):
             tokens.add(SearchToken("keyword", configured_value, normalized_value))
         elif kind == "phrase" and contains_phrase(text, normalized_value):
             tokens.add(SearchToken("phrase", configured_value, normalized_value))
