@@ -9,6 +9,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Persistent key/value state uses `runtime_settings` via `get/set/delete_runtime_setting`. Schema changes are a new `Migration` in `migrations.py`.
 - Admin actions call `_audit(...)`. Telegram calls are best-effort: log and audit failures, never break sorting.
 - Application code is dispatched through TriAPI rebuild; sessions plan, write prompts, and audit responses.
+- Deploy: `miki-sorter.service` runs a uv-installed COPY, not the repo. After code changes: back up `var/miki.sqlite3`, `uv tool install --reinstall .`, `systemctl --user restart miki-sorter.service`, then `miki-doctor`. Phases 3-5b deployed 2026-09-25 (schema 16).
 - The old `windows/` copy was purged (staged deletion, recoverable from commit 808c019). Work only in the root package.
 
 ## Test commands
