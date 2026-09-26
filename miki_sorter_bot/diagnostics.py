@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from miki_sorter_bot.config import Settings, get_settings
 from miki_sorter_bot.repositories import SqliteRepositories
+from miki_sorter_bot.settings_registry import LiveSettings
 from miki_sorter_bot.storage import Storage
 
 
@@ -38,12 +39,13 @@ class DiagnosticReport:
 
 
 def run_diagnostics(settings: Settings, repositories: SqliteRepositories) -> DiagnosticReport:
+    effective_topic_id = LiveSettings(settings, repositories).effective_source_thread_id()
     checks = [
         DiagnosticCheck("ok", "database", "SQLite opened and migrations completed."),
         DiagnosticCheck(
             "ok",
             "source",
-            f"Listening to chat {settings.source_chat_id}, topic {settings.source_thread_id}.",
+            f"Listening to chat {settings.source_chat_id}, topic {effective_topic_id}.",
         ),
         _runtime_check(settings),
         *_archive_checks(settings, repositories),
@@ -160,11 +162,12 @@ def _source_activity_checks(
 ) -> Iterable[DiagnosticCheck]:
     if not getattr(settings, "source_activity_check_enabled", False):
         return
+    effective_topic_id = LiveSettings(settings, repositories).effective_source_thread_id()
     hours = getattr(settings, "source_activity_window_hours", 24)
     since = datetime.now(UTC) - timedelta(hours=hours)
     recent = repositories.count_recent_source_posts(
         settings.source_chat_id,
-        settings.source_thread_id,
+        effective_topic_id,
         since.isoformat(),
     )
     if recent:

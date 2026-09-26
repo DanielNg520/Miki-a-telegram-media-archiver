@@ -14,7 +14,7 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | `sorting.py` | `SortingService` — eligibility, route resolution/precedence, album buffering + flush timers, durable idempotent delivery. |
 | `topic_activity.py` | `TopicActivity` — shared album dedup and the persisted `rotation_media_count` (`<thread>:<n>` in runtime settings); called once per media post from `sorting.py`. |
 | `message_deletion.py` | `MessageDeletionService` — persisted timed deletion queue (`scheduled_deletions`, migration 14); `schedule(chat_id, message_id, delay_seconds)`, 60s sweep job. Used by `retrieval.py` for the request-response TTL. |
-| `rotation.py` | `RotationService` — rotates the source topic on media count or elapsed hours (60s tick). Persists `cycle_started_at`, `topic_cycle`, `rotated_topics` (migration 16). `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]`. |
+| `rotation.py` | `RotationService` — rotates the source topic on media count or elapsed hours (60s tick). Persists `cycle_started_at`, `topic_cycle`, `rotated_topics` (migration 16). `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]`. Failure backoff, resumable pending rotation, retargets burner bridges. |
 | `indexing.py` (duplicates) | `media_unique_id` stores `posts.file_unique_id`; `find_duplicate` in `repositories.py`; `sorting.py` `_notify_duplicate` links the earlier archive copy. |
 | `routing.py` | `Route` value type and route matching primitives. |
 | `indexing.py` | `MessageIndexer` (duck-typed message → indexed post + tokens), `IndexingService`, the deterministic token `extract_search_tokens`, and `/reindex`. `MessageIndexer(cache_mappings=True)` caches mappings per instance; only burner crawls enable it. |

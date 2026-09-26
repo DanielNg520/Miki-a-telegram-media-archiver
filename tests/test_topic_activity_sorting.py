@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 
 from miki_sorter_bot.repositories import SqliteRepositories
+from miki_sorter_bot.rotation import RotationService
 from miki_sorter_bot.settings_registry import LiveSettings
 from miki_sorter_bot.sorting import SortingService
 from miki_sorter_bot.topic_activity import TopicActivity
@@ -131,3 +132,25 @@ def test_media_outside_source_topic_not_counted(database_connection):
     _run(service, msg)
     assert activity.rotation_count() == 0
     assert notice.on_media.call_count == 1
+
+
+def test_sorted_posts_make_rotation_due(database_connection):
+    service, activity = _make(database_connection, Mock())
+    repositories = SqliteRepositories(database_connection)
+    live = LiveSettings(
+        SimpleNamespace(
+            **{**vars(_settings()), "rotate_enabled": True, "rotate_media_threshold": 3}
+        ),
+        repositories,
+    )
+    rotation = RotationService(_settings(), repositories, live, activity)
+
+    _run(
+        service,
+        _message("a", message_id=12),
+        _message("b", message_id=13),
+        _message("c", message_id=14),
+    )
+
+    assert activity.rotation_count() == 3
+    assert rotation.due_reason() == "media"

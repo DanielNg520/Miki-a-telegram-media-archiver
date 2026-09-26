@@ -184,6 +184,17 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Tests: each trigger, first-wins, restart persistence, failed creation keeps cycle 10, next title `Cycle 11`, roster rewrite, archive topics never deleted.
 - Handoff: `rotation.py` `RotationService` (`tick`, `rotate`, `cleanup`, `due_reason`, `status_text`), `make_tick_job` 60s wired in `main.py`. Migration 16 `rotated_topics`; repo `add_rotated_topic/is_rotated_topic/rotated_topics_due_for_deletion/mark_rotated_topic_deleted`. Specs `rotate_enabled` (default off), `rotate_media_threshold`, `rotate_interval_hours`, `rotate_topic_title`, `topic_cycle` (10), `closed_topic_delete_days` (30). Commands `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]` (super-admin). `track_topic_status` ignores rotated source topics. Announcements are permanent (no deletion scheduling). Audit outcomes must be success/denied/failed (DB CHECK); partial rotations are success with `details.problems`. 509 tests, `make verify` green. DeepSeek defects: audit outcomes from my prompt (`failure`/`partial`, silently dropped by `_audit`), dict rows vs tuples, dropped `{n}` braces in tests. Hand edits: splice fix, `main.py`/`management.py` wiring, test fixtures. Next: phase 6.
 
+## Phase 5b — Rotation hardening [x] DONE (audit follow-up to phase 5)
+- Keys: `rotation_retry`=`<retry_at>:<failures>` (300s doubling, cap 6h, tick only; `/rotate_now` bypasses), `rotation_pending`=`<old>:<new>:<cycle>`, `rotation_last` JSON.
+- `rotate` creates topic, persists pending, then `_finish` (idempotent, resumable by tick after crash or failed switch). No second topic is ever created while pending.
+- `_finish` also calls `retarget_bridges(old,new)` so burner bridges follow the live source topic. Only bridges that targeted the old topic move.
+- Interval trigger needs at least one counted post; `due_reason` starts the cycle clock even on an idle topic.
+- Cleanup: missing topic (`BadRequest` topic_id_invalid/not found) counts as deleted; mark failure still counts; preview capped at 30 lines.
+- `run_diagnostics` reads the effective source topic. `/rotate_status` shows pending, backoff, last result, eligible closed topics.
+- Accepted: posts in the old topic between switch and close are unsorted; resume may repeat the pointer message; audit outcome for partial rotation is `success` with `details.problems`.
+- Tests: `tests/test_rotation_hardening.py` (backoff, resume, bridges, cleanup, handlers, wiring), sorting-to-rotation test in `tests/test_topic_activity_sorting.py`. 529 tests, `make verify` green.
+- DeepSeek defects: dropped imports, invented `live.set`, wrong fake clock and `main` wiring test from my prompt. Hand edits: imports, test fixtures, `BadRequest` import, `get_runtime_setting` on `test_main` stub.
+
 ## Phase 6 — Forwarded-media sender mute [ ] TODO (NEXT)
 - Needs: phase 4 (notice deletion) and phase 1. Files: new `forward_mute.py`, `sorting.py`, `settings_registry.py`, `main.py`.
 - Extends: `Management._is_admin` (exempt admins and managers), `_audit`, phase 4 `schedule_deletion`, sorting entry `handle_update`.

@@ -253,6 +253,7 @@ class RotatedTopicRepository(Protocol):
         self, chat_id: int, closed_before: int
     ) -> list[tuple[int, int]]: ...
     def mark_rotated_topic_deleted(self, chat_id: int, thread_id: int, deleted_at: int) -> None: ...
+    def retarget_bridges(self, old_thread_id: int, new_thread_id: int) -> int: ...
 
 
 class ProcessedUpdateRepository(Protocol):
@@ -1941,6 +1942,18 @@ class SqliteRepositories:
             """
         ).fetchall()
         return [_burner_bridge_record(row) for row in rows]
+
+    def retarget_bridges(self, old_thread_id: int, new_thread_id: int) -> int:
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE burner_bridges
+                SET source_thread_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE source_thread_id = ?
+                """,
+                (new_thread_id, old_thread_id),
+            )
+            return cursor.rowcount
 
     def update_bridge_checkpoint(self, bridge_id: int, last_forwarded_id: int) -> None:
         with self._connection:

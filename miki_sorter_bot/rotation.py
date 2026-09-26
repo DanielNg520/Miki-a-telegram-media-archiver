@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+
+from telegram.error import BadRequest
 
 from miki_sorter_bot.logging_config import reset_correlation_id, set_correlation_id
 from miki_sorter_bot.repositories import RotatedTopicRepository
@@ -19,6 +22,7 @@ class _Repositories(RotatedTopicRepository, Protocol):
     def set_runtime_setting(
         self, key: str, value: str, updated_by_user_id: int | None = None
     ) -> None: ...
+    def delete_runtime_setting(self, key: str) -> bool: ...
     def add_audit_event(
         self,
         *,
@@ -51,6 +55,69 @@ class RotationService:
         self._clock = clock
         self._notify = notify
         self._lock = asyncio.Lock()
+
+    def _pending(self) -> tuple[int, int, int] | None:
+        raw = self._repositories.get_runtime_setting("rotation_pending")
+        if raw is None:
+            return None
+        parts = raw.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            return int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            return None
+
+    def _set_pending(self, old: int, new: int, cycle: int) -> None:
+        self._repositories.set_runtime_setting("rotation_pending", f"{old}:{new}:{cycle}")
+
+    def _clear_pending(self) -> None:
+        try:
+            self._repositories.delete_runtime_setting("rotation_pending")
+        except Exception:
+            LOGGER.warning("Failed to clear rotation_pending", exc_info=True)
+
+    def _backoff(self) -> tuple[int, int] | None:
+        raw = self._repositories.get_runtime_setting("rotation_retry")
+        if raw is None:
+            return None
+        parts = raw.split(":")
+        if len(parts) != 2:
+            return None
+        try:
+            return int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+
+    def _backoff_active(self) -> bool:
+        parsed = self._backoff()
+        if parsed is None:
+            return False
+        retry_at, _ = parsed
+        return int(self._clock()) < retry_at
+
+    def _record_failure(self) -> None:
+        previous = self._backoff()
+        failures = 1 if previous is None else previous[1] + 1
+        delay = min(300 * 2 ** (failures - 1), 21600)
+        retry_at = int(self._clock()) + delay
+        try:
+            self._repositories.set_runtime_setting("rotation_retry", f"{retry_at}:{failures}")
+        except Exception:
+            LOGGER.warning("Failed to persist rotation_retry", exc_info=True)
+
+    def _clear_backoff(self) -> None:
+        try:
+            self._repositories.delete_runtime_setting("rotation_retry")
+        except Exception:
+            LOGGER.warning("Failed to clear rotation_retry", exc_info=True)
+
+    def _record_last(self, ok: bool, text: str) -> None:
+        payload = json.dumps({"at": int(self._clock()), "ok": ok, "text": text[:200]})
+        try:
+            self._repositories.set_runtime_setting("rotation_last", payload)
+        except Exception:
+            LOGGER.warning("Failed to persist rotation_last", exc_info=True)
 
     def _cycle_started(self) -> int:
         thread_id = self._live.effective_source_thread_id()
@@ -100,8 +167,13 @@ class RotationService:
         if threshold > 0 and self._activity.rotation_count() >= threshold:
             return "media"
         interval = self._live.rotate_interval_seconds()
-        if interval > 0 and int(self._clock()) - self._cycle_started() >= interval:
-            return "interval"
+        if interval > 0:
+            cycle_started = self._cycle_started()
+            if (
+                self._activity.rotation_count() >= 1
+                and int(self._clock()) - cycle_started >= interval
+            ):
+                return "interval"
         return None
 
     def status_text(self) -> str:
@@ -112,14 +184,54 @@ class RotationService:
         threshold = self._live.rotate_media_threshold()
         interval = self._live.rotate_interval_seconds()
         elapsed = int(self._clock()) - self._cycle_started()
-        return (
-            f"Rotation enabled: {enabled}\n"
-            f"Source topic id: {thread_id}\n"
-            f"Current cycle: {cycle}\n"
-            f"Next cycle: {cycle + 1}\n"
-            f"Media count: {media_count}/{threshold}\n"
-            f"Hours elapsed: {elapsed / 3600:.1f}/{interval / 3600:.1f}"
-        )
+
+        lines = [
+            f"Rotation enabled: {enabled}",
+            f"Source topic id: {thread_id}",
+            f"Current cycle: {cycle}",
+            f"Next cycle: {cycle + 1}",
+            f"Media count: {media_count}/{threshold}",
+            f"Hours elapsed: {elapsed / 3600:.1f}/{interval / 3600:.1f}",
+        ]
+
+        delete_seconds = self._live.closed_topic_delete_seconds()
+        if delete_seconds > 0:
+            eligible = len(
+                self._repositories.rotated_topics_due_for_deletion(
+                    self._settings.source_chat_id,
+                    int(self._clock()) - delete_seconds,
+                )
+            )
+            lines.append(f"Eligible closed topics: {eligible}")
+
+        pending = self._pending()
+        if pending is not None:
+            old, new, pending_cycle = pending
+            lines.append(
+                f"Pending rotation: {old} -> {new} (cycle {pending_cycle}); "
+                "will resume automatically"
+            )
+
+        backoff = self._backoff()
+        if backoff is not None:
+            retry_at, failures = backoff
+            remaining = max(0, retry_at - int(self._clock()))
+            lines.append(f"Retry backoff: failures {failures}, retry in {remaining / 60:.0f} min")
+
+        raw_last = self._repositories.get_runtime_setting("rotation_last")
+        if raw_last is not None:
+            try:
+                last = json.loads(raw_last)
+                at = int(last["at"])
+                ok = bool(last["ok"])
+                text = str(last["text"])
+                hours_ago = (int(self._clock()) - at) / 3600
+                state = "ok" if ok else "failed"
+                lines.append(f"Last rotation: {state} {hours_ago:.1f}h ago - {text}")
+            except (ValueError, KeyError, TypeError):
+                pass
+
+        return "\n".join(lines)
 
     async def _tell(self, context, text: str) -> None:
         if self._notify is None:
@@ -133,29 +245,34 @@ class RotationService:
         if self._lock.locked():
             return "Rotation already in progress."
         async with self._lock:
+            pending = self._pending()
+            if pending is not None:
+                old, new, cycle = pending
+                return await self._finish(context, old, new, cycle, actor=actor, reason=reason)
+
             chat_id = self._settings.source_chat_id
             old = self._live.effective_source_thread_id()
-            next_cycle = self._live.topic_cycle() + 1
-            title = self._live.rotate_topic_title().format(n=next_cycle)
+            cycle = self._live.topic_cycle() + 1
+            title = self._live.rotate_topic_title().format(n=cycle)
             try:
                 created = await context.bot.create_forum_topic(chat_id=chat_id, name=title)
                 new_thread_id = created.message_thread_id
             except Exception as error:
+                self._record_failure()
                 self._audit(
                     actor,
                     "rotation.rotate",
                     "failed",
                     {"reason": reason, "error": str(error)},
                 )
+                self._record_last(False, f"create topic failed: {error}")
                 await self._tell(context, f"Topic rotation failed: {error}")
                 return f"Rotation failed: {error}"
 
-            problems: list[str] = []
-
             try:
-                self._repositories.set_runtime_setting("source_thread_id", str(new_thread_id))
+                self._set_pending(old, new_thread_id, cycle)
             except Exception as error:
-                LOGGER.warning("Failed to persist source_thread_id", exc_info=True)
+                self._record_failure()
                 self._audit(
                     actor,
                     "rotation.rotate",
@@ -166,116 +283,162 @@ class RotationService:
                         "new_thread_id": new_thread_id,
                     },
                 )
+                self._record_last(False, f"persist pending failed: {error}")
                 await self._tell(
                     context,
                     f"Rotation failed after creating topic {title} "
-                    f"(id {new_thread_id}); source topic unchanged.",
+                    f"(id {new_thread_id}); topic is orphaned and must be reported.",
                 )
                 return (
-                    f"Rotation failed: could not persist new source topic "
-                    f"({title}, id {new_thread_id})"
+                    f"Rotation failed: created topic {title} (id {new_thread_id}) "
+                    f"but could not persist pending state: {error}"
                 )
 
-            try:
+            return await self._finish(
+                context, old, new_thread_id, cycle, actor=actor, reason=reason
+            )
+
+    async def _finish(
+        self, context, old: int, new: int, cycle: int, *, actor: str, reason: str
+    ) -> str:
+        title = self._live.rotate_topic_title().format(n=cycle)
+        chat_id = self._settings.source_chat_id
+        problems: list[str] = []
+
+        try:
+            self._repositories.set_runtime_setting("source_thread_id", str(new))
+        except Exception as error:
+            self._record_failure()
+            self._audit(
+                actor,
+                "rotation.rotate",
+                "failed",
+                {"reason": reason, "error": str(error), "new_thread_id": new},
+            )
+            self._record_last(False, f"persist source_thread_id failed: {error}")
+            await self._tell(
+                context,
+                f"Rotation switch to topic {title} (id {new}) failed: {error}; "
+                "will retry automatically.",
+            )
+            return (
+                f"Rotation switch failed: could not persist source_thread_id "
+                f"({title}, id {new}); will retry automatically."
+            )
+
+        try:
+            self._live.registry.set(
+                "topic_cycle",
+                str(cycle),
+                self._live.settings,
+                self._live.store,
+                None,
+            )
+        except Exception as error:
+            LOGGER.warning("Failed to set topic_cycle", exc_info=True)
+            problems.append(f"set cycle: {error}")
+
+        try:
+            self._activity.reset_rotation()
+            self._restart_cycle_clock()
+        except Exception as error:
+            LOGGER.warning("Failed to reset activity or cycle clock", exc_info=True)
+            problems.append(f"reset counters: {error}")
+
+        try:
+            explicit_roster = self._repositories.get_runtime_setting("periodic_notice_topics")
+            if (
+                explicit_roster is not None
+                and old != 0
+                and old in self._live.get("periodic_notice_topics")
+            ):
+                roster = set(self._live.get("periodic_notice_topics"))
+                roster.discard(old)
+                roster.add(new)
+                raw_roster = ", ".join(str(t) for t in sorted(roster))
                 self._live.registry.set(
-                    "topic_cycle",
-                    str(next_cycle),
+                    "periodic_notice_topics",
+                    raw_roster,
                     self._live.settings,
                     self._live.store,
                     None,
                 )
-            except Exception as error:
-                LOGGER.warning("Failed to set topic_cycle", exc_info=True)
-                problems.append(f"set cycle: {error}")
+        except Exception as error:
+            LOGGER.warning("Failed to rewrite notice roster", exc_info=True)
+            problems.append(f"rewrite roster: {error}")
 
+        if old != 0:
             try:
-                self._activity.reset_rotation()
-                self._restart_cycle_clock()
+                self._repositories.retarget_bridges(old, new)
             except Exception as error:
-                LOGGER.warning("Failed to reset activity or cycle clock", exc_info=True)
-                problems.append(f"reset counters: {error}")
+                LOGGER.warning("Failed to retarget bridges", exc_info=True)
+                problems.append(f"retarget bridges: {error}")
 
-            try:
-                explicit_roster = self._repositories.get_runtime_setting("periodic_notice_topics")
-                if explicit_roster is not None and old in self._live.get("periodic_notice_topics"):
-                    roster = set(self._live.get("periodic_notice_topics"))
-                    roster.discard(old)
-                    roster.add(new_thread_id)
-                    raw_roster = ", ".join(str(t) for t in sorted(roster))
-                    self._live.registry.set(
-                        "periodic_notice_topics",
-                        raw_roster,
-                        self._live.settings,
-                        self._live.store,
-                        None,
-                    )
-            except Exception as error:
-                LOGGER.warning("Failed to rewrite notice roster", exc_info=True)
-                problems.append(f"rewrite roster: {error}")
-
-            link = (
-                f"https://t.me/c/{str(chat_id)[4:]}/{new_thread_id}"
-                if str(chat_id).startswith("-100")
-                else f"https://t.me/c/{chat_id}/{new_thread_id}"
-            )
-            if old != 0:
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        message_thread_id=old,
-                        text=f"Topic moved: {link}",
-                    )
-                except Exception as error:
-                    LOGGER.warning("Failed to post pointer in old topic", exc_info=True)
-                    problems.append(f"pointer old: {error}")
+        link = (
+            f"https://t.me/c/{str(chat_id)[4:]}/{new}"
+            if str(chat_id).startswith("-100")
+            else f"https://t.me/c/{chat_id}/{new}"
+        )
+        if old != 0:
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    message_thread_id=new_thread_id,
-                    text=f"New topic: {title}",
+                    message_thread_id=old,
+                    text=f"Topic moved: {link}",
                 )
             except Exception as error:
-                LOGGER.warning("Failed to post announcement in new topic", exc_info=True)
-                problems.append(f"announce new: {error}")
+                LOGGER.warning("Failed to post pointer in old topic", exc_info=True)
+                problems.append(f"pointer old: {error}")
 
-            if old != 0:
-                try:
-                    await context.bot.close_forum_topic(chat_id=chat_id, message_thread_id=old)
-                except Exception as error:
-                    LOGGER.warning("Failed to close old topic", exc_info=True)
-                    problems.append(f"close old: {error}")
-                else:
-                    try:
-                        self._repositories.add_rotated_topic(
-                            chat_id, old, next_cycle - 1, int(self._clock())
-                        )
-                    except Exception as error:
-                        LOGGER.warning("Failed to record rotated topic", exc_info=True)
-                        problems.append(f"record old: {error}")
-
-            outcome = "success"
-            self._audit(
-                actor,
-                "rotation.rotate",
-                outcome,
-                {
-                    "reason": reason,
-                    "old_thread_id": old,
-                    "new_thread_id": new_thread_id,
-                    "cycle": next_cycle,
-                    "problems": problems,
-                },
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=new,
+                text=f"New topic: {title}",
             )
-            if problems:
-                await self._tell(
-                    context,
-                    f"Rotation to {title} (id {new_thread_id}) had problems: "
-                    + "; ".join(problems),
-                )
-            summary = f"Rotated to {title} (topic {new_thread_id})"
-            if problems:
-                summary += "; problems: " + "; ".join(problems)
-            return summary
+        except Exception as error:
+            LOGGER.warning("Failed to post announcement in new topic", exc_info=True)
+            problems.append(f"announce new: {error}")
+
+        if old != 0:
+            try:
+                await context.bot.close_forum_topic(chat_id=chat_id, message_thread_id=old)
+            except Exception as error:
+                LOGGER.warning("Failed to close old topic", exc_info=True)
+                problems.append(f"close old: {error}")
+            else:
+                try:
+                    self._repositories.add_rotated_topic(
+                        chat_id, old, cycle - 1, int(self._clock())
+                    )
+                except Exception as error:
+                    LOGGER.warning("Failed to record rotated topic", exc_info=True)
+                    problems.append(f"record old: {error}")
+
+        self._clear_pending()
+        self._clear_backoff()
+        self._audit(
+            actor,
+            "rotation.rotate",
+            "success",
+            {
+                "reason": reason,
+                "old_thread_id": old,
+                "new_thread_id": new,
+                "cycle": cycle,
+                "problems": problems,
+            },
+        )
+        summary = f"Rotated to {title} (topic {new})"
+        if problems:
+            summary += "; problems: " + "; ".join(problems)
+        self._record_last(True, summary)
+        if problems:
+            await self._tell(
+                context,
+                f"Rotation to {title} (id {new}) had problems: " + "; ".join(problems),
+            )
+        return summary
 
     async def cleanup(self, context, *, confirm: bool, actor: str) -> str:
         delete_seconds = self._live.closed_topic_delete_seconds()
@@ -294,39 +457,70 @@ class RotationService:
             return "Nothing eligible for deletion."
         if not confirm:
             lines = [f"Cycle {cycle} (topic {thread_id})" for thread_id, cycle in eligible]
+            extra = len(eligible) - 30
+            preview = lines[:30]
+            if extra > 0:
+                preview.append(f"...and {extra} more")
             return (
                 "Eligible for deletion:\n"
-                + "\n".join(lines)
+                + "\n".join(preview)
                 + "\nRun /rotate_cleanup confirm to delete."
             )
         deleted = 0
         failed = 0
         for thread_id, cycle in eligible:
+            already_gone = False
             try:
                 await context.bot.delete_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
+            except Exception as error:
+                if isinstance(error, BadRequest):
+                    msg = str(error).lower()
+                    if "topic_id_invalid" in msg or "not found" in msg:
+                        already_gone = True
+                    else:
+                        LOGGER.warning(
+                            "Failed to delete rotated topic %s", thread_id, exc_info=True
+                        )
+                        self._audit(
+                            actor,
+                            "rotation.cleanup",
+                            "failed",
+                            {"thread_id": thread_id, "cycle": cycle, "error": str(error)},
+                        )
+                        failed += 1
+                        continue
+                else:
+                    LOGGER.warning("Failed to delete rotated topic %s", thread_id, exc_info=True)
+                    self._audit(
+                        actor,
+                        "rotation.cleanup",
+                        "failed",
+                        {"thread_id": thread_id, "cycle": cycle, "error": str(error)},
+                    )
+                    failed += 1
+                    continue
+            try:
                 self._repositories.mark_rotated_topic_deleted(
                     chat_id, thread_id, int(self._clock())
                 )
-                self._audit(
-                    actor,
-                    "rotation.cleanup",
-                    "success",
-                    {"thread_id": thread_id, "cycle": cycle},
-                )
-                deleted += 1
-            except Exception as error:
-                LOGGER.warning("Failed to delete rotated topic %s", thread_id, exc_info=True)
-                self._audit(
-                    actor,
-                    "rotation.cleanup",
-                    "failed",
-                    {"thread_id": thread_id, "cycle": cycle, "error": str(error)},
-                )
-                failed += 1
+            except Exception:
+                LOGGER.warning("Failed to mark rotated topic %s deleted", thread_id, exc_info=True)
+            self._audit(
+                actor,
+                "rotation.cleanup",
+                "success",
+                {"thread_id": thread_id, "cycle": cycle, "already_gone": already_gone},
+            )
+            deleted += 1
         return f"Cleanup finished: {deleted} deleted, {failed} failed."
 
     async def tick(self, context) -> None:
         if self._lock.locked():
+            return
+        if self._backoff_active():
+            return
+        if self._pending() is not None:
+            await self.rotate(context, actor="system", reason="resume")
             return
         reason = self.due_reason()
         if reason is None:

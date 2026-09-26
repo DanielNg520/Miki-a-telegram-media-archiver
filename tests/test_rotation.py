@@ -79,6 +79,7 @@ def test_due_reason_interval(database_connection):
         rotate_interval_hours=1,
         rotate_media_threshold=0,
     )
+    assert activity.record(5, None)
     assert service.due_reason() is None
     clock_state[0] += 3600.0
     assert service.due_reason() == "interval"
@@ -103,6 +104,7 @@ def test_cycle_clock_persists_across_services(database_connection):
         rotate_interval_hours=1,
         rotate_media_threshold=0,
     )
+    assert activity.record(5, None)
     assert service.due_reason() is None
     service2 = RotationService(
         settings,

@@ -93,6 +93,7 @@ def test_startup_checkin_sends_doctor_summary_to_notification_targets() -> None:
     repositories = SimpleNamespace(
         list_topics=Mock(return_value=[]),
         list_mappings=Mock(return_value=[]),
+        get_runtime_setting=Mock(return_value=None),
         operational_status=Mock(
             return_value={
                 "database": "ok",
