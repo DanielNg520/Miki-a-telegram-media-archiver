@@ -2282,3 +2282,44 @@ def test_reply_failure_counts_metric_and_sort_still_succeeds(database_connection
 
 def test_post_link_formats_archive_link() -> None:
     assert post_link(-1001234567890, 7, 42) == "https://t.me/c/1234567890/7/42"
+
+
+def test_duplicate_in_album_notifies_once_on_first_member(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    _routes(repositories)
+    service = SortingService(_settings(), repositories, IndexingService(_settings(), repositories))
+    bot = SimpleNamespace(
+        id=50,
+        copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
+        send_media_group=AsyncMock(
+            return_value=[SimpleNamespace(message_id=90), SimpleNamespace(message_id=91)]
+        ),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    chat = SimpleNamespace(id=-100, type="supergroup")
+    first = _message("#Japan", message_id=12)
+    first.photo = [SimpleNamespace(file_id="f", file_unique_id="uniq-1")]
+    members = [
+        _message("#Japan", message_id=20, media_group_id="album-1"),
+        _message("", message_id=21, media_group_id="album-1"),
+    ]
+    members[0].photo = [SimpleNamespace(file_id="f20", file_unique_id="uniq-1")]
+    members[1].photo = [SimpleNamespace(file_id="f21", file_unique_id="uniq-2")]
+
+    async def run() -> None:
+        await service.handle_update(
+            SimpleNamespace(effective_message=first, effective_chat=chat), context
+        )
+        for member in members:
+            await service.handle_update(
+                SimpleNamespace(effective_message=member, effective_chat=chat), context
+            )
+        await service.flush_pending_albums(context)
+
+    asyncio.run(run())
+
+    members[0].reply_text.assert_awaited_once()
+    assert "https://t.me/c/200/9/99" in members[0].reply_text.await_args.args[0]
+    members[1].reply_text.assert_not_awaited()
+    first.reply_text.assert_not_awaited()

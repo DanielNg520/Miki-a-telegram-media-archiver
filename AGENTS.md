@@ -163,10 +163,11 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - `SqliteRepositories.find_duplicate` returns the oldest earlier available post with the same `file_unique_id` and a different `logical_post_key`.
 - `_notify_duplicate` replies to the source message with a `post_link` to the earlier archive copy; once per album; best-effort, metric `duplicate_notice_failures`. Spec `duplicate_notice_enabled` (default on).
 - Limits: exact file match only (re-encoded or cropped copies differ); posts indexed before migration 15 have no id until re-crawled; burner backfill records ids but sends no notice.
-- Handoff: 493 tests, `make verify` green. Hand fixes: `find_duplicate` first select lacked `file_unique_id`, `id < ?` (earlier only), `post_link` strips `-100` only when present, `media_unique_id` guards non-list photo.
+- Known gaps (accepted): link may not open for members outside the archive chat; notice is not auto-deleted; `_backed_up` dedupe is RAM-only (restart may re-back-up); crash between copy and deletion scheduling leaks one message.
+- Handoff: 494 tests (album notice test added), `make verify` green. Hand fixes: `find_duplicate` first select lacked `file_unique_id`, `id < ?` (earlier only), `post_link` strips `-100` only when present, `media_unique_id` guards non-list photo.
 
-## Phase 5 — Topic rotation and closed-topic cleanup [ ] TODO
-- Needs: phases 3 and 4. Files: new `rotation.py`, `migrations.py`, `repositories.py`, `management.py`, `main.py`, `settings_registry.py`.
+## Phase 5 — Topic rotation and closed-topic cleanup [ ] TODO (NEXT)
+- Needs: phases 3 and 4 (both DONE; use `MessageDeletionService.schedule` and `TopicActivity.rotation_count/reset_rotation`). Files: new `rotation.py`, `migrations.py`, `repositories.py`, `management.py`, `main.py`, `settings_registry.py`.
 - Extends: `TopicActivity` (count), `source_thread_id` runtime override (same key `/source_set` writes), JobQueue tick, `track_topic_status`.
 - Trigger is one 60s tick job checking count and elapsed time, not a hot-path await. Lock so `/rotate_now` and the tick cannot double rotate.
 - `cycle_started_at` persists as `<thread_id>:<epoch>`; a thread mismatch reads as now, mirroring the phase 3 counter self-heal.
