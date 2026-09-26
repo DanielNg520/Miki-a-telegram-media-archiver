@@ -93,8 +93,8 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 
 # Carryover
 
-## Phase 6 — Forwarded-media sender mute [ ] TODO (NEXT)
-- Needs phases 4 and 1 (done). Start of session: read this file, run `make test`. End: tick the phase, fill Handoff, commit.
+## Phase 6 — Forwarded-media sender mute [ ] DEFERRED (blocked on admin rights)
+- Do not start until the group admin grants the bot Delete Messages and Restrict Members (decided 2026-09-25: unlikely, so deferred). Needs phases 4 and 1 (done). Start of session: read this file, run `make test`. End: tick the phase, fill Handoff, commit.
 - Files: new `forward_mute.py`, `sorting.py`, `settings_registry.py`, `main.py`, `docs/codebase-map.md`.
 - Extends `Management._is_admin` (exempt admins and managers), `_audit`, `MessageDeletionService.schedule`, and sorting entry `handle_update`.
 - Locked: delete the media first, then restrict the sender, then post a tagged reason notice deleted after 24h.
@@ -102,6 +102,6 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Scope: the effective source topic and forwarding-pair source topics, the same predicate sorting uses. Run before counting, look-back, backup and sorting.
 - Every album member is deleted on arrival. Mute and notice fire once per (chat, user) within a short window.
 - Settings: `forward_mute_enabled`, `forward_mute_minutes`, `forward_mute_reason` as `SettingSpec`s, editable text via `/set`.
-- Needs bot rights Delete Messages and Restrict Members (currently missing). Open: notice posts in the source topic tagging the user, since bots cannot DM non-starters.
+- Open: notice posts in the source topic tagging the user, since bots cannot DM non-starters.
 - Tests: delete precedes restrict, album fully deleted, admin and manager exempt, hidden sender skipped, API errors audited, one mute per album, never backed up.
 - Handoff:
