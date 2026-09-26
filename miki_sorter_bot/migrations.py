@@ -451,6 +451,21 @@ MIGRATIONS = (
             WHERE file_unique_id IS NOT NULL;
         """,
     ),
+    Migration(
+        16,
+        "rotated_topics",
+        """
+        CREATE TABLE rotated_topics (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL,
+            cycle INTEGER NOT NULL,
+            closed_at INTEGER NOT NULL,
+            deleted_at INTEGER NULL,
+            PRIMARY KEY (chat_id, thread_id)
+        );
+        CREATE INDEX idx_rotated_topics_chat_closed ON rotated_topics(chat_id, closed_at);
+        """,
+    ),
 )
 
 

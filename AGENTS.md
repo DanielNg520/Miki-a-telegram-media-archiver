@@ -28,7 +28,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Storage: `repositories.py`, `migrations.py`, `storage.py`. Reliability: `recovery.py`, `reliability.py`, `diagnostics.py`.
 - Notices: `periodic_notice.py`. Burner account: `burner*.py`. Serving: `main.py`, `health_server.py`, `webhook_supervisor.py`.
 - Tooling: `scripts/bench_indexing.py` (indexing benchmark, outside `make verify`).
-- Timed deletion: `message_deletion.py`. Notice counter: `topic_activity.py` (album dedup, persisted rotation count). Planned: `rotation.py` (phase 5), `forward_mute.py` (phase 6).
+- Timed deletion: `message_deletion.py`. Notice counter: `topic_activity.py` (album dedup, persisted rotation count). Rotation: `rotation.py`. Planned: `forward_mute.py` (phase 6).
 
 ---
 
@@ -166,7 +166,7 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Known gaps (accepted): link may not open for members outside the archive chat; notice is not auto-deleted; `_backed_up` dedupe is RAM-only (restart may re-back-up); crash between copy and deletion scheduling leaks one message.
 - Handoff: 494 tests (album notice test added), `make verify` green. Hand fixes: `find_duplicate` first select lacked `file_unique_id`, `id < ?` (earlier only), `post_link` strips `-100` only when present, `media_unique_id` guards non-list photo.
 
-## Phase 5 — Topic rotation and closed-topic cleanup [ ] TODO (NEXT)
+## Phase 5 — Topic rotation and closed-topic cleanup [x] DONE
 - Needs: phases 3 and 4 (both DONE; use `MessageDeletionService.schedule` and `TopicActivity.rotation_count/reset_rotation`). Files: new `rotation.py`, `migrations.py`, `repositories.py`, `management.py`, `main.py`, `settings_registry.py`.
 - Extends: `TopicActivity` (count), `source_thread_id` runtime override (same key `/source_set` writes), JobQueue tick, `track_topic_status`.
 - Trigger is one 60s tick job checking count and elapsed time, not a hot-path await. Lock so `/rotate_now` and the tick cannot double rotate.
@@ -182,9 +182,9 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Deletion of closed topics: only rows in `rotated_topics` with `chat_id == source_chat_id`, after the day count, manual confirm in v1, audited.
 - Add `/rotate_now` and `/rotate_status` (admin) registered in the `main.py` handlers dict; both go through `_audit`.
 - Tests: each trigger, first-wins, restart persistence, failed creation keeps cycle 10, next title `Cycle 11`, roster rewrite, archive topics never deleted.
-- Handoff:
+- Handoff: `rotation.py` `RotationService` (`tick`, `rotate`, `cleanup`, `due_reason`, `status_text`), `make_tick_job` 60s wired in `main.py`. Migration 16 `rotated_topics`; repo `add_rotated_topic/is_rotated_topic/rotated_topics_due_for_deletion/mark_rotated_topic_deleted`. Specs `rotate_enabled` (default off), `rotate_media_threshold`, `rotate_interval_hours`, `rotate_topic_title`, `topic_cycle` (10), `closed_topic_delete_days` (30). Commands `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]` (super-admin). `track_topic_status` ignores rotated source topics. Announcements are permanent (no deletion scheduling). Audit outcomes must be success/denied/failed (DB CHECK); partial rotations are success with `details.problems`. 509 tests, `make verify` green. DeepSeek defects: audit outcomes from my prompt (`failure`/`partial`, silently dropped by `_audit`), dict rows vs tuples, dropped `{n}` braces in tests. Hand edits: splice fix, `main.py`/`management.py` wiring, test fixtures. Next: phase 6.
 
-## Phase 6 — Forwarded-media sender mute [ ] TODO
+## Phase 6 — Forwarded-media sender mute [ ] TODO (NEXT)
 - Needs: phase 4 (notice deletion) and phase 1. Files: new `forward_mute.py`, `sorting.py`, `settings_registry.py`, `main.py`.
 - Extends: `Management._is_admin` (exempt admins and managers), `_audit`, phase 4 `schedule_deletion`, sorting entry `handle_update`.
 - Check `forward_origin` on the message (PTB >= 21.4). Only origin type `user` counts; `hidden_user`, `chat`, `channel` are skipped.

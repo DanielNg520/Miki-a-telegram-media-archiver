@@ -9,7 +9,7 @@ from miki_sorter_bot.repositories import SqliteRepositories
 
 
 def _settings(*admins: int) -> SimpleNamespace:
-    return SimpleNamespace(admin_user_ids=frozenset(admins))
+    return SimpleNamespace(admin_user_ids=frozenset(admins), source_chat_id=-100)
 
 
 def _update(

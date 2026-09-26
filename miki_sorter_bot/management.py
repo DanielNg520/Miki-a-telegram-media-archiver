@@ -13,6 +13,7 @@ from miki_sorter_bot.diagnostics import run_diagnostics
 from miki_sorter_bot.indexing import IndexingService
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.periodic_notice import PeriodicNoticeService
+from miki_sorter_bot.rotation import RotationService
 from miki_sorter_bot.recovery import JobRecoveryService
 from miki_sorter_bot.repositories import SqliteRepositories, normalize_mapping
 from miki_sorter_bot.settings_registry import LiveSettings, UnknownSettingError
@@ -32,6 +33,7 @@ class ManagementCommands:
         recovery: JobRecoveryService | None = None,
         live_settings: LiveSettings | None = None,
         notice: "PeriodicNoticeService | None" = None,
+        rotation: "RotationService | None" = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -41,6 +43,7 @@ class ManagementCommands:
         self._recovery = recovery
         self._live = live_settings or LiveSettings(settings, repositories)
         self._notice = notice
+        self._rotation = rotation
 
     async def topic_register(
         self,
@@ -790,6 +793,43 @@ class ManagementCommands:
         await message.reply_text(f"Verified backup created: {destination.name}")
         self._audit(user.id, "operations.backup", "database_backup", destination.name)
 
+    async def rotate_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        if self._rotation is None:
+            await message.reply_text("Rotation service is unavailable.")
+            return
+        text = await self._rotation.rotate(context, actor=str(user.id), reason="manual")
+        await message.reply_text(text)
+
+    async def rotate_status(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        if self._rotation is None:
+            await message.reply_text("Rotation service is unavailable.")
+            return
+        await message.reply_text(self._rotation.status_text())
+        self._audit(user.id, "rotation.status", "source_topic", "status")
+
+    async def rotate_cleanup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        command = await self._admin_context(update)
+        if command is None:
+            return
+        message, _, user = command
+        if self._rotation is None:
+            await message.reply_text("Rotation service is unavailable.")
+            return
+        text = message.text or ""
+        parts = text.split()
+        confirm = len(parts) > 1 and parts[1].lower() == "confirm"
+        await message.reply_text(
+            await self._rotation.cleanup(context, confirm=confirm, actor=str(user.id))
+        )
+
     async def track_topic_status(
         self,
         update: Update,
@@ -798,6 +838,10 @@ class ManagementCommands:
         message = update.effective_message
         chat = update.effective_chat
         if message is None or chat is None or not message.message_thread_id:
+            return
+        if chat.id == self._settings.source_chat_id and self._repositories.is_rotated_topic(
+            chat.id, message.message_thread_id
+        ):
             return
         if message.forum_topic_closed:
             self._repositories.update_topic_state(

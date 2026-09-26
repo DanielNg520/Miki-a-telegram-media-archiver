@@ -244,6 +244,17 @@ class ScheduledDeletionRepository(Protocol):
     def increment_metric(self, name: str, amount: int = 1) -> None: ...
 
 
+class RotatedTopicRepository(Protocol):
+    def add_rotated_topic(
+        self, chat_id: int, thread_id: int, cycle: int, closed_at: int
+    ) -> None: ...
+    def is_rotated_topic(self, chat_id: int, thread_id: int) -> bool: ...
+    def rotated_topics_due_for_deletion(
+        self, chat_id: int, closed_before: int
+    ) -> list[tuple[int, int]]: ...
+    def mark_rotated_topic_deleted(self, chat_id: int, thread_id: int, deleted_at: int) -> None: ...
+
+
 class ProcessedUpdateRepository(Protocol):
     def claim(self, update_id: int, operation: str) -> bool: ...
 
@@ -656,6 +667,39 @@ class SqliteRepositories:
             self._connection.execute(
                 "DELETE FROM scheduled_deletions WHERE chat_id = ? AND message_id = ?",
                 (chat_id, message_id),
+            )
+
+    def add_rotated_topic(self, chat_id: int, thread_id: int, cycle: int, closed_at: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO rotated_topics (chat_id, thread_id, cycle, closed_at) "
+                "VALUES (?, ?, ?, ?)",
+                (chat_id, thread_id, cycle, closed_at),
+            )
+
+    def is_rotated_topic(self, chat_id: int, thread_id: int) -> bool:
+        cursor = self._connection.execute(
+            "SELECT 1 FROM rotated_topics WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        )
+        return cursor.fetchone() is not None
+
+    def rotated_topics_due_for_deletion(
+        self, chat_id: int, closed_before: int
+    ) -> list[tuple[int, int]]:
+        cursor = self._connection.execute(
+            "SELECT thread_id, cycle FROM rotated_topics "
+            "WHERE chat_id = ? AND deleted_at IS NULL AND closed_at <= ? "
+            "ORDER BY closed_at",
+            (chat_id, closed_before),
+        )
+        return [(row["thread_id"], row["cycle"]) for row in cursor.fetchall()]
+
+    def mark_rotated_topic_deleted(self, chat_id: int, thread_id: int, deleted_at: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE rotated_topics SET deleted_at = ? WHERE chat_id = ? AND thread_id = ?",
+                (deleted_at, chat_id, thread_id),
             )
 
     def list_runtime_settings(self) -> dict[str, str]:

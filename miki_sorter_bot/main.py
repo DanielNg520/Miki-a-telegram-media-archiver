@@ -30,6 +30,8 @@ from miki_sorter_bot.instance_lock import AlreadyRunningError, InstanceLock
 from miki_sorter_bot.management import ManagementCommands
 from miki_sorter_bot.message_deletion import MessageDeletionService, make_sweep_job
 from miki_sorter_bot.periodic_notice import PeriodicNoticeService, make_tick_job
+from miki_sorter_bot.rotation import RotationService
+from miki_sorter_bot.rotation import make_tick_job as make_rotation_job
 from miki_sorter_bot.topic_activity import TopicActivity
 from miki_sorter_bot.operations import OperationsService
 from miki_sorter_bot.recovery import JobRecoveryService
@@ -138,6 +140,13 @@ def _run(settings: Settings) -> None:
         activity=activity,
     )
     deletion = MessageDeletionService(repositories)
+
+    async def notify_rotation(context, text: str) -> None:
+        await _notify_operators(context.application, settings, text)
+
+    rotation = RotationService(
+        settings, repositories, live_settings, activity, notify=notify_rotation
+    )
     retrieval = RetrievalService(
         settings, repositories, delivery_executor, live_settings=live_settings, deletion=deletion
     )
@@ -164,6 +173,7 @@ def _run(settings: Settings) -> None:
         recovery,
         live_settings=live_settings,
         notice=notice,
+        rotation=rotation,
     )
     heartbeat = Heartbeat()
 
@@ -252,6 +262,7 @@ def _run(settings: Settings) -> None:
     _schedule_webhook_reconcile(application, settings, webhook_supervisor)
     _schedule_periodic_notice(application, notice)
     _schedule_message_deletion(application, deletion)
+    _schedule_rotation(application, rotation)
     _schedule_lookback_sweep(application, sorting)
     _add_management_handlers(application, management)
     # group=-1 runs before routing: every inbound update proves liveness without
@@ -422,6 +433,19 @@ def _schedule_message_deletion(
         interval=60,
         first=60,
         name="message-deletion",
+    )
+
+
+def _schedule_rotation(application: Application, rotation: RotationService) -> None:
+    job_queue = application.job_queue
+    if job_queue is None:
+        LOGGER.warning("Topic rotation requires the JobQueue, which is unavailable.")
+        return
+    job_queue.run_repeating(
+        make_rotation_job(rotation),
+        interval=60,
+        first=60,
+        name="topic-rotation",
     )
 
 
@@ -631,6 +655,9 @@ def _add_management_handlers(
         "notice_show": management.notice_show,
         "notice_topic_add": management.notice_topic_add,
         "notice_topic_remove": management.notice_topic_remove,
+        "rotate_now": management.rotate_now,
+        "rotate_status": management.rotate_status,
+        "rotate_cleanup": management.rotate_cleanup,
         "maintenance": management.maintenance,
         "backup": management.backup,
         "burner": management.burner,

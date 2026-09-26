@@ -146,6 +146,21 @@ def render_tag_topic_pairs(value: tuple[tuple[str, int], ...]) -> str:
     return ",".join(f"{tag}:{topic_id}" for tag, topic_id in value)
 
 
+def parse_topic_title(raw: str) -> str:
+    stripped = raw.strip()
+    if stripped.count("{n}") != 1:
+        raise ValueError("title must contain {n} exactly once")
+    if "{" in stripped.replace("{n}", "", 1) or "}" in stripped.replace("{n}", "", 1):
+        raise ValueError("no other braces allowed in title")
+    if not (1 <= len(stripped.format(n=1)) <= 128):
+        raise ValueError("formatted title must be 1-128 characters")
+    return stripped
+
+
+def render_topic_title(value: str) -> str:
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SettingSpec:
     key: str
@@ -411,6 +426,54 @@ def default_registry() -> SettingsRegistry:
                     getattr(s, "media_backup_tag_topics", "jav:2,asian:3")
                 ),
             ),
+            SettingSpec(
+                "rotate_enabled",
+                "rotation",
+                "Automatic source-topic rotation on/off.",
+                parse_bool,
+                render_bool,
+                lambda s: bool(getattr(s, "rotate_enabled", False)),
+            ),
+            SettingSpec(
+                "rotate_media_threshold",
+                "rotation",
+                "Media posts (album = 1) that trigger rotation; 0 disables this trigger.",
+                bounded_int(0, 1000000),
+                render_number,
+                lambda s: int(getattr(s, "rotate_media_threshold", 1000)),
+            ),
+            SettingSpec(
+                "rotate_interval_hours",
+                "rotation",
+                "Hours after which rotation triggers regardless; 0 disables this trigger.",
+                bounded_int(0, 8760),
+                render_number,
+                lambda s: int(getattr(s, "rotate_interval_hours", 336)),
+            ),
+            SettingSpec(
+                "rotate_topic_title",
+                "rotation",
+                "Topic title template; must contain {n}.",
+                parse_topic_title,
+                render_topic_title,
+                lambda s: str(getattr(s, "rotate_topic_title", "Cycle {n}")),
+            ),
+            SettingSpec(
+                "topic_cycle",
+                "rotation",
+                "Number of the current cycle; the next topic is topic_cycle + 1.",
+                bounded_int(0, 1000000),
+                render_number,
+                lambda s: int(getattr(s, "topic_cycle", 10)),
+            ),
+            SettingSpec(
+                "closed_topic_delete_days",
+                "rotation",
+                "Days after which closed rotated topics become eligible for manual deletion; 0 disables.",
+                bounded_int(0, 3650),
+                render_number,
+                lambda s: int(getattr(s, "closed_topic_delete_days", 30)),
+            ),
         ]
     )
 
@@ -501,6 +564,24 @@ class LiveSettings:
 
     def notice_interval_minutes(self) -> int:
         return int(self.get("periodic_notice_interval_minutes"))
+
+    def rotate_enabled(self) -> bool:
+        return bool(self.get("rotate_enabled"))
+
+    def rotate_media_threshold(self) -> int:
+        return int(self.get("rotate_media_threshold"))
+
+    def rotate_interval_seconds(self) -> int:
+        return int(self.get("rotate_interval_hours")) * 3600
+
+    def rotate_topic_title(self) -> str:
+        return str(self.get("rotate_topic_title"))
+
+    def topic_cycle(self) -> int:
+        return int(self.get("topic_cycle"))
+
+    def closed_topic_delete_seconds(self) -> int:
+        return int(self.get("closed_topic_delete_days")) * 86400
 
     def effective_source_thread_id(self) -> int:
         """The source topic in force: a runtime override if set, else the env value.
