@@ -10,6 +10,7 @@ configured destination topic.
 - The source and archive chats must be Telegram supergroups.
 - The destination "subfolders" must be forum topics.
 - The bot must be admin, or at least have permission to read messages and send messages in both groups.
+- Optional admin rights, each unlocking one feature: **Manage Topics** (topic rotation), **Delete Messages** (auto-deleting members' request messages and `/rotate_cleanup`; Miki can always delete her own messages), **Restrict Members** (reserved for the planned forwarded-media mute).
 - If the source group has privacy mode enabled for bots, disable it with BotFather or only send messages that mention/command the bot.
 
 ## Install
@@ -293,6 +294,39 @@ disables that trigger).
 
 Topic open/close/rename in Telegram is tracked automatically — closing a topic deactivates it
 (routing/indexing pause), reopening reactivates it, and renaming updates the stored name.
+
+### Topic rotation
+
+Miki can move the source topic to a fresh one (`Cycle {n}`) so no single topic grows forever. A 60s
+tick checks two triggers, whichever comes first, and rotation ships **off**:
+
+- **Media** — after `rotate_media_threshold` posts (default 1000; an album counts as one).
+- **Time** — after `rotate_interval_hours` (default 336, two weeks), only once the cycle has at least one post.
+
+On rotation Miki creates `Cycle {n+1}`, points the source at it, moves burner bridges that fed the old
+topic, posts a pointer in the old topic, and closes it. Progress is persisted, so a restart or a failed
+step resumes instead of creating a second topic. Failures back off (5 min, doubling, capped at 6 h) and
+are reported to the operators.
+
+Milestone notices (`rotate_milestones_enabled`, default on) post in the source topic at 80%, 90% and 100%
+of each trigger, plus a "rotates within 24 hours" notice, and delete themselves after 24 hours.
+
+| Command | Who | What it does |
+| --- | --- | --- |
+| `/rotate_status` | Super admin | Shows cycle, media and time progress, pending or failed rotation, and eligible closed topics. |
+| `/rotate_now` | Super admin | Rotates immediately (also resumes an interrupted rotation). |
+| `/rotate_cleanup [confirm]` | Super admin | Lists, or with `confirm` deletes, topics Miki closed more than `closed_topic_delete_days` (30) ago. Never touches archive topics. |
+
+Settings (`/set <key> <value>`): `rotate_enabled`, `rotate_media_threshold`, `rotate_interval_hours`
+(0 disables a trigger), `rotate_topic_title` (must contain `{n}`), `topic_cycle` (current cycle number),
+`closed_topic_delete_days` (0 disables), `rotate_milestones_enabled`. Enable with
+`/set rotate_enabled true`.
+
+### Other automatic behaviours
+
+- **Request cleanup** — Miki's request replies, delivered media and (if `request_delete_user_message` is on) the requester's message are deleted after `request_response_ttl_hours` (default 24, max 48, 0 disables).
+- **Duplicate notice** — when a media file already archived is posted again, Miki replies with a link to the earlier post (`duplicate_notice_enabled`, default on). Exact file matches only.
+- **Backup group** — tagged media is also copied, without sender or @mentions/links in the caption, to `media_backup_chat_id`; `media_backup_tag_topics` maps hashtags to topics (default `jav:2,asian:3`).
 
 ### Keyword routes
 

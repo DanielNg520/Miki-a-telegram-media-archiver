@@ -182,6 +182,18 @@ monitoring (`health`, `watch`, `status`, `doctor`, `backup`, `maintenance`, `log
 cross-platform service management (`install`, `load`, `unload`, `restart`, `uninstall`,
 `service-status`).
 
+### Local service (Linux, systemd user unit)
+
+Here `miki-sorter.service` runs a uv-installed **copy** of the package, not the checkout, so code changes
+only take effect after a reinstall:
+
+```bash
+cp var/miki.sqlite3 var/backups/pre-upgrade.sqlite3   # or /backup in chat; migrations are forward-only
+uv tool install --reinstall .
+systemctl --user restart miki-sorter.service
+miki-doctor
+```
+
 ### Local service (macOS / Windows)
 
 For running Miki on a personal machine instead of a hosted target, `miki-ops install` registers

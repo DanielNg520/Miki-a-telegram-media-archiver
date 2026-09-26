@@ -7,211 +7,101 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Chat-configurable knobs are one `SettingSpec` in `settings_registry.py`. Never add a per-setting command.
 - Timed or repeating work uses the shared `JobQueue` (`main.py`), wrapped like `make_tick_job` in `periodic_notice.py`.
 - Persistent key/value state uses `runtime_settings` via `get/set/delete_runtime_setting`. Schema changes are a new `Migration` in `migrations.py`.
-- Admin actions call `_audit(...)`. Telegram calls are best-effort: log and audit failures, never break sorting.
+- Admin actions call `_audit(...)`. Audit outcomes must be `success`, `denied` or `failed` (DB CHECK drops anything else).
+- Telegram calls are best-effort: log and audit failures, never break sorting. Nothing awaits inside the sorting hot path.
 - Application code is dispatched through TriAPI rebuild; sessions plan, write prompts, and audit responses.
-- Deploy: `miki-sorter.service` runs a uv-installed COPY, not the repo. After code changes: back up `var/miki.sqlite3`, `uv tool install --reinstall .`, `systemctl --user restart miki-sorter.service`, then `miki-doctor`. Phases 3-5b deployed 2026-09-25 (schema 16).
-- The old `windows/` copy was purged (staged deletion, recoverable from commit 808c019). Work only in the root package.
+- Work only in the root package. The old `windows/` copy was purged (recoverable from commit 808c019).
 
-## Test commands
-- `make test` runs `python -m pytest -q` (use the project `.venv`). `make verify` is the full gate: lint, typecheck, security, package.
-- Single file: `python -m pytest tests/test_sorting.py -q`. `make coverage` adds a coverage report.
+## Test and deploy
+- `make test` runs `python -m pytest -q` (project `.venv`). `make verify` is the full gate: lint, format, mypy, bandit, pip-audit, package.
+- Single file: `python -m pytest tests/test_sorting.py -q`. Format only touched files with `ruff format <files>`.
+- After `uv sync` use `--all-extras` or the dev tools vanish.
+- `miki-sorter.service` runs a uv-installed COPY, not the repo. Deploy: back up `var/miki.sqlite3`, `uv tool install --reinstall .`.
+- Then `systemctl --user restart miki-sorter.service` and `miki-doctor`. Migrations are forward-only. Live schema is 16 (2026-09-25).
+- Bot admin rights on the source group: Manage Topics yes (rotation works), Delete Messages no, Restrict Members no.
+
+## Dispatch recipe (TriAPI)
+- Write the prompt to a scratchpad file. From `~/Documents/Coding/TriAPI/rebuild` run `python3 scripts/call_deepseek.py --prompt-file F --system-file RULES.md`.
+- Use quoted heredocs (`<<'E'`). Prompts quote target code verbatim, state behaviour not code, one function per call, code blocks only.
+- Prompts must list exact import paths (`miki_sorter_bot.*`) and use the `database_connection` fixture directly.
+- Reject and redispatch on any defect; never patch silently. Hand edits: wiring, imports, types, one-token test fixes; report them.
+- Recurring DeepSeek defects: invented attributes/paths, dropped imports or `{n}` braces, dict-vs-tuple rows, UTF-16 offsets, wrong chat id.
+- Ignore the harmless `oh-my-llama` stderr lines.
 
 ## Architecture (see `docs/architecture.md`, `docs/codebase-map.md`)
 - `main.py` wires services, handlers, and JobQueue jobs. `sorting.py` is the hot path for source-topic media.
 - `retrieval.py` serves member requests. `indexing.py` builds the searchable post index. `burner_backfill.py` crawls history into it.
 - `settings_registry.py` holds `SettingSpec`, `SettingsRegistry`, `LiveSettings`. `management.py` holds admin commands.
-- `periodic_notice.py` is the model service: counts media, JobQueue tick, delete-previous, runtime-KV state.
-- `repositories.py` is all SQLite access. `storage.py` opens the DB (WAL). `bot_console.py` runs commands via `miki-ops bot`.
+- `repositories.py` is all SQLite access. `storage.py` opens the DB (WAL, `synchronous=NORMAL`). `bot_console.py` runs commands via `miki-ops bot`.
+- Source topics live in `source_chat_id`; the `topics` table holds archive-chat topics only. Retrieval copies from archive posts.
 
 ## File index (package `miki_sorter_bot/`)
 - Routing: `sorting.py`, `routing.py`, `lookback.py`. Requests: `retrieval.py`. Index: `indexing.py`, `burner_backfill.py`.
 - Config: `config.py`, `settings_registry.py`. Admin: `management.py`, `ops.py`, `bot_console.py`, `operations.py`.
 - Storage: `repositories.py`, `migrations.py`, `storage.py`. Reliability: `recovery.py`, `reliability.py`, `diagnostics.py`.
-- Notices: `periodic_notice.py`. Burner account: `burner*.py`. Serving: `main.py`, `health_server.py`, `webhook_supervisor.py`.
+- Notices: `periodic_notice.py`. Counter and album dedup: `topic_activity.py`. Timed deletion: `message_deletion.py`. Rotation: `rotation.py`.
+- Burner account: `burner*.py`. Serving: `main.py`, `health_server.py`, `webhook_supervisor.py`. Planned: `forward_mute.py` (phase 6).
 - Tooling: `scripts/bench_indexing.py` (indexing benchmark, outside `make verify`).
-- Timed deletion: `message_deletion.py`. Notice counter: `topic_activity.py` (album dedup, persisted rotation count). Rotation: `rotation.py`. Planned: `forward_mute.py` (phase 6).
 
 ---
 
-# Completed Work
+# Completed work
 
-## Backup media to second group (commit 59f8e95)
-- `Sorting._backup_to_second_group` copies media to chat `-1004365154840`: `#JAV` to topic 2, `#Asian` to topic 3, JAV wins.
-- Albums use `copy_messages`; singles use `copy_message`. Hooked into `_deliver_album_messages` and three `handle_update` fast paths.
-- Same commit added `_album_send_gate` (one album upload at a time), undocumented until now.
-- Audit found defects; fixed in phase 1 below.
+## Backup to second group and sender removal (phase 1)
+- `Sorting` copies `#JAV` media to topic 2 and `#Asian` to topic 3 of the backup group; JAV wins. Whole-tag match via `HASHTAG_RE`.
+- Specs `media_backup_chat_id`, `media_backup_tag_topics`. Captions lose @mentions and links (UTF-16 aware); copies show no sender.
+- Dedupe per `(chat_id, message_id)` in RAM (5000; a restart may re-back-up). Failures count in metric `media_backup_failures`.
+- Albums copy inside `_album_send_gate` (one album upload at a time).
+
+## Index write speed (phase 2)
+- `PRAGMA synchronous=NORMAL` in `Storage.open` gave ~15x (347 to 5294 posts/s). Power loss may drop the last commit, never corrupt.
+- `MessageIndexer(cache_mappings=True)` for burner crawls only. Benchmark: `TMPDIR=~/.cache/bench python scripts/bench_indexing.py --posts 20000 --mappings 50 --reindex`.
+- Bulk transactions reached 26k posts/s but were reverted as unused; burner batching needs buffering so no write lock spans Telegram waits.
+
+## Shared media counter (phase 3)
+- `TopicActivity` (`is_new_post`, `record`, `rotation_count`, `reset_rotation`) owns album dedup and the persisted count `rotation_media_count`=`<thread>:<n>`.
+- A stored thread different from the effective source topic reads as 0, which self-heals `/source_set` and rotation.
+- Sorting calls `record` once, then `notice.on_media(..., counted=)`. Edits and Miki-authored messages are not counted.
+
+## Timed deletion and request cleanup (phase 4)
+- `MessageDeletionService.schedule(chat_id, message_id, delay_seconds)` plus a 60s sweep job. Table `scheduled_deletions` (migration 14), `INSERT OR IGNORE`.
+- Sweep drops rows on non-retryable errors (Forbidden, BadRequest), re-queues retryable ones +300s, stops on RetryAfter, caps 50 per tick.
+- Specs `request_response_ttl_hours` (24, max 48, 0 disables), `request_delete_user_message`. Deleting members' messages needs Delete Messages; Forbidden counts in `scheduled_deletions_failed`.
+- `RetrievalService(deletion=)` routes replies through `_reply` and schedules copies and the request message. A crash between copy and schedule leaks one message (accepted).
+
+## Duplicate media link (phase 4b)
+- `posts.file_unique_id` (migration 15). `find_duplicate` returns the oldest earlier available post with the same file and a different `logical_post_key`.
+- `_notify_duplicate` replies once per album with a link to the archive copy; spec `duplicate_notice_enabled`; metric `duplicate_notice_failures`.
+- Limits: exact file match only; posts indexed before migration 15 have no id; the notice is not auto-deleted; the link may not open outside the archive chat.
+
+## Topic rotation (phases 5, 5b, 5c)
+- `RotationService` (`rotation.py`): 60s tick rotates the source topic at `rotate_media_threshold` posts or `rotate_interval_hours`, whichever first. Ships off.
+- Specs: `rotate_enabled`, `rotate_media_threshold` (1000), `rotate_interval_hours` (336), `rotate_topic_title` (needs `{n}`), `topic_cycle` (unset means 10), `closed_topic_delete_days` (30), `rotate_milestones_enabled`.
+- Commands (super admin): `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]`. Announcements in old and new topic are permanent.
+- Keys: `cycle_started_at`=`<thread>:<epoch>`, `rotation_pending`=`<old>:<new>:<cycle>`, `rotation_retry`=`<retry_at>:<failures>`, `rotation_last` JSON, `rotation_milestones`=`<thread>:<cycle>:<labels>`.
+- `rotate` creates the topic, persists pending, then `_finish` (idempotent). A tick resumes pending work; no second topic is created while pending.
+- `_finish` order: switch `source_thread_id`, bump `topic_cycle`, reset counters, rewrite explicit notice roster, `retarget_bridges`, pointer messages, close and record old topic.
+- Failures back off 300s doubling, cap 6h (tick only; `/rotate_now` bypasses) and notify operators. Interval trigger needs at least one counted post.
+- Closed topics are recorded in `rotated_topics` (migration 16). `track_topic_status` ignores them. `/rotate_cleanup` deletes only those rows, only after confirm; needs Delete Messages.
+- Milestones: notices at 80/90/100% of each trigger plus "within 24 hours"; highest crossed level only; labels marked before sending; auto-delete after 24h.
+- `run_diagnostics` reads the effective source topic. Tests: `tests/test_rotation*.py`, `tests/test_topic_activity_sorting.py`.
+- Accepted gaps: posts in the old topic between switch and close go unsorted; a resume may repeat the pointer; a failed close is not retried.
+- Accepted gaps: two 100% notices can post together; a 100% notice may precede a failed rotation; a stale cycle clock can rotate at once after a long disabled period.
+- Live test 2026-09-25 worked; reverted (source 66512, cycle 10, next `Cycle 11`). Test topic 68164 was left in place.
 
 ---
 
-# Carryover: phased roadmap
-
-Each phase runs in its own session. Start of session: read this file, run the test command, take the first phase not marked DONE.
-End of session: tick the phase, fill its Handoff line, keep this file within limits, commit.
-Phases are ordered by dependency. Do not start a phase whose "Needs" phases are not DONE.
-
-## Temporary waiver (granted by user 2026-09-25)
-- The size and format limits above (1000 lines, 30 words per line, single file) are waived until phase 6 is DONE.
-- Waiver ends when phase 6 is ticked: trim this file back within limits and delete this section in that session.
-
-## Locked decisions
-- Rotation: new topic when 1000 media posts (album = 1) or 336 hours (2 weeks) pass, whichever first.
-- Topic title `Cycle {n}`; current cycle is 10, so the next topic is `Cycle 11`. Counter advances only after a successful switch.
-- Request responses (Miki text replies and delivered media) and the requester's request message auto-delete after 24h, configurable.
-- Forwarded media with a visible sender: delete the media first, then mute, then post a tagged reason notice deleted after 24h.
-- Backup copies must show no sender: no forward header, and captions have @mentions and links stripped.
-- Stripping needs a caption override: `copy_message(caption=...)` for singles; albums re-send via `send_media_group` since `copy_messages` cannot edit captions.
-- Rotation media count persists in `runtime_settings` (option C, one row upsert per counted post) so restarts never reset it.
-- Persisted keys: `rotation_media_count`, `cycle_started_at`, `topic_cycle`. Album dedup memory stays in RAM.
-- Deleting closed topics is manual-confirm in the first release; only topics Miki closed herself.
-
-## Open decisions (ask the user before the phase that needs them)
-- Muted-member notice (phase 6): assumed posted in the source topic tagging the user, since bots cannot DM non-starters.
-
-## Phase 0 — Line endings and baseline [x] DONE
-- Needs: none. Decided order: (1) commit the `windows/` purge (86 files already staged), (2) `.gitattributes` + normalization, (3) review the ~575 real edits, run `make test`, commit separately.
-- `.codegraph/` is already added to `.gitignore` (uncommitted); include it in the first commit. Always gitignore it in every repo.
-- Working tree shows ~3,800 changed lines but only ~575 real; HEAD is CRLF, tree is LF.
-- Add `.gitattributes` (`* text=auto eol=lf`), commit normalization alone, then commit or stash the real pending edits separately.
-- Done when: `git diff --stat` is small and `uv run pytest -q` is green.
-- Handoff: commits 76556ea (windows/ purge, .codegraph ignore), LF normalization + `.gitattributes`, then pending edits. `git diff` clean, 421 tests green. Next: phase 1.
-
-## Phase 1 — Backup hardening and sender removal [x] DONE
-- Needs: phase 0. Files: `sorting.py`, `settings_registry.py`, `indexing.py`, `tests/test_sorting.py`.
-- Match hashtags as whole tags (`#java`, `#javascript` must not match `#jav`); import the single `HASHTAG_RE` from `indexing.py`.
-- Move backup chat id, tag-to-topic map into registry specs; remove hardcoded values and trailing whitespace.
-- Dedupe per `(chat_id, message_id)` so retries and look-back never back up twice. Run backup inside or after `_album_send_gate`, not before.
-- Check `copy_messages` result count; audit or count failures instead of only logging.
-- Sender removal: strip @mentions and links (also text_link/mention entities) from captions before backup; keep `#JAV`/`#Asian` tags matched on the original text.
-- Verify the copied post carries no "forwarded from" header. Remove duplicate `_effective_source_thread_id` in favour of `LiveSettings`.
-- Tests: tag precedence, substring false positives, album, dedupe, failure swallowed, no sender/@mention in backup.
-- Handoff: specs `media_backup_chat_id`, `media_backup_tag_topics` (`jav:2,asian:3`, ordered). Sorting: `_strip_sender_identifiers`, `_copy_one_to_backup`, in-RAM `_backed_up` dedupe (5000), metric `media_backup_failures`, album backup inside `_album_send_gate`. `_effective_source_thread_id` removed; use `_live`. 439 tests green. Phase 1 code came from TriAPI DeepSeek dispatch (4 audit rounds): audits caught UTF-16 offsets, wrong chat id, wrong-member dedupe. Cleanup 2026-09-25 (`make verify` green, 440 tests): added `_win_uninstall`, fixed types, CVE bumps in `uv.lock`. Next: phase 2.
-
-## Integration rules (audit 2026-09-25, binding for phases 2-6)
-- Run order: 2, 3, 4, 5, 6. Phase 3 needs the phase 2 benchmark; phase 5 needs 3 and 4; phase 6 needs 4.
-- Baseline `make verify` is green (cleanup 2026-09-25). Each phase must keep it green: lint, format, mypy, bandit, pip-audit, package.
-- Format only touched files with `ruff format <files>`; keep unrelated diffs out. After `uv sync` use `--all-extras` or dev tools vanish.
-- Each phase lands: repo protocol methods, `main.py` wiring, `docs/codebase-map.md` entry, this file, tests. No half-wired service.
-- New timed work is one JobQueue job via the `make_tick_job` pattern. Nothing awaits inside the sorting hot path.
-- Source topics live in `source_chat_id`; the `topics` table holds archive-chat topics only. Never touch archive topics from rotation.
-- Retrieval copies from archive-chat posts (`index_copy`), so deleting closed source topics cannot break requests.
-- Admin checks reuse `Management._is_admin`; audit rows reuse `_audit`. Do not add parallel permission or audit code.
-- Dispatch recipe: write the prompt to a scratchpad file, then from `~/Documents/Coding/TriAPI/rebuild` run `python3 scripts/call_deepseek.py --prompt-file F --system-file RULES.md`.
-- Prompts quote target code verbatim, state one function per call, and ask for code blocks only. Reject and redispatch on any defect; never patch silently.
-- Use quoted heredocs (`<<'E'`) for prompt files; unquoted ones let the shell eat backticks. Ignore the harmless `oh-my-llama` stderr lines.
-- Tests are dispatched too; hand edits are limited to wiring, imports, types, and one-token test fixes, and are reported to the user.
-- Dispatch prompts state behaviour, not code. Audit every reply: past defects were UTF-16 offsets, wrong chat id, wrong-member bookkeeping.
-
-## Phase 2 — Index/database build optimization [x] DONE
-- Needs: phase 0. Files: `indexing.py`, `repositories.py`, `storage.py`, `burner_backfill.py`, new benchmark script.
-- Extends: `MessageIndexer.index`, `SqliteRepositories.upsert_post`, `Storage.open`. Nothing new to build except the benchmark.
-- Step 1: benchmark 20k synthetic posts through `MessageIndexer.index`; record before numbers here. Keep only if it stays useful.
-- Every further step must show a measured gain in the benchmark, else drop it. Do not ship unmeasured optimizations.
-- Cache `list_mappings` per crawl in `MessageIndexer` with explicit invalidation; the burner process holds it only for one crawl.
-- Drop the extra `get_post` re-read only after checking `upsert_post` callers; `MessageIndexer.index` ignores the return value.
-- Token skip: compare the computed token set to the stored set, not caption plus `extractor_version`. Tokens also depend on route mappings.
-- Bulk transactions: 43 `with self._connection:` blocks each commit, and inner commits would break an outer transaction.
-- If bulk is justified, replace them with one `_tx()` context manager (depth counter, commit at depth 0). Otherwise rely on WAL plus `synchronous=NORMAL`.
-- `PRAGMA synchronous=NORMAL` in `Storage.open` is global: a power loss can lose the last commit, never corrupt. Accept for phases 3-4.
-- Checkpoint `min_id` after commit only when bulk exists. Add `PRAGMA optimize` after bulk runs.
-- Gate: `test_indexing`, `test_retrieval`, `test_recovery`, `test_burner_backfill` pass unchanged. Record after numbers here.
-- Step 1 DONE: `scripts/bench_indexing.py` (TriAPI DeepSeek, 3 rounds: audits caught non-media messages, invented private attribute). Run `TMPDIR=~/.cache/bench python scripts/bench_indexing.py --posts 20000 --mappings 50 --reindex`. `/tmp` is tmpfs; hides fsync cost.
-- BEFORE (20k posts, btrfs): 0 mappings 348 posts/s first, 352 reindex. 50 mappings 328 / 329. `list_mappings` called once per post (20000). Cost is per-post commit plus fsync.
-- Step 2 DONE: `MessageIndexer(cache_mappings=True)` (opt-in, burner crawls only; instance lifetime is the invalidation, no invalidate method). 328 to 347 posts/s (+6%), `list_mappings` calls 20000 to 1. Bench flag `--cache-mappings`.
-- Audit 2026-09-25: clean. Bulk `_tx()` and `PRAGMA optimize` plan bullets above are superseded by Step 3. Cache dict fills even when caching is off (harmless).
-- Step 3 DONE: `PRAGMA synchronous=NORMAL` in `Storage.open` (main connection only): 347 to 5294 posts/s (~15x). Bulk `transaction()` reached 26k posts/s (batch 100) but was reverted: unused code, and burner batching needs buffering so no write lock spans Telegram waits.
-- Not pursued (unmeasured, plan says drop): `get_post` re-read, token-set skip, `PRAGMA optimize`, `min_id` checkpoint.
-- Handoff: commits e0eea02 (benchmark), 42ac7a2 (mapping cache), then the pragma commit. 442 tests, `make verify` green. Benchmark is `scripts/bench_indexing.py`. Phase 3 can use it for write cost: ~5300 posts/s means one persisted counter row per post is cheap. Optional follow-up: burner batch flush (26k posts/s). Next: phase 3.
-
-## Phase 3 — Shared persisted media counter [x] DONE
-- Needs: phase 2 (benchmark for write cost). Files: new `topic_activity.py`, `periodic_notice.py`, `sorting.py`, `settings_registry.py`.
-- Extends: the count and album-dedup logic already in `PeriodicNoticeService.on_media`. Move it, do not copy it.
-- `TopicActivity.record(topic_id, group_id) -> bool` returns whether this post counted. It owns the shared album dedup window.
-- Counters are independent per consumer: notice resets its count on every post; rotation resets only on rotation.
-- Hook once in `sorting.py` beside the existing `_notice.on_media` call, not inside it: `on_media` returns early when notices are disabled.
-- Rotation counts only the effective source topic, not every notice topic. Skip edits and Miki-authored messages as the notice does.
-- Persist `rotation_media_count` as `<thread_id>:<count>`. A stored thread different from the effective source topic reads as 0.
-- That self-heals `/source_set` and rotation with no change to `management.py`. Cache the count in RAM, load once, write once per counted post.
-- Persistence failure is logged and skipped; it never breaks sorting.
-- Tests: `tests/test_periodic_notice.py` unchanged and green, restart-survives-count, album-counts-once, stale-thread-reads-zero, notices-disabled-still-counts.
-- Handoff: `topic_activity.py` `TopicActivity` (`is_new_post`, `record`, `rotation_count`, `reset_rotation`), key `rotation_media_count`=`<thread>:<n>`. Sorting calls `record` then `notice.on_media(..., counted=)`; notice falls back to own instance. 458 tests, `make verify` green. DeepSeek defects: invented `repositories.runtime_settings`, invented import paths, fixture passed as arg (redispatched once, then hand-fixed one loop and one assertion). Sorting-level counting covered by `tests/test_topic_activity_sorting.py`. Next: phase 4.
-
-## Phase 4 — Timed message deletion queue and 24h request cleanup [x] DONE
-- Needs: phase 0. Files: `migrations.py`, `repositories.py`, `retrieval.py`, `main.py`, `settings_registry.py`, `docs/codebase-map.md`.
-- Extends: `RetrievalService` sends, `update_retrieval_item(destination_message_id)`, the JobQueue tick pattern. New table is genuinely new.
-- Migration: `scheduled_deletions(chat_id, message_id, delete_at, PRIMARY KEY(chat_id, message_id))` plus index on `delete_at`.
-- Repository methods on the repo protocol and `SqliteRepositories`: `schedule_deletion`, `due_deletions`, `remove_deletions`.
-- One 60s sweep job wrapped like `make_tick_job`; it lives with the deletion service, not in `retrieval.py`.
-- Settings: `request_response_ttl_hours` (default 24, 0 = never), `request_delete_user_message` (default on), as `SettingSpec`s.
-- Hook three points only: a `_reply` helper replacing every `request_message.reply_text`, both delivery success paths, and the request message.
-- `RecoveredRequestMessage.reply_text` must return the sent message, like PTB, so recovered replies also schedule.
-- Delivered copies use their `destination_message_id`; schedule at the same call that records `sent`.
-- The sweep removes rows even when deletion fails (already gone) so nothing retries forever. Failures counted as a metric.
-- Phase 6 notices reuse `schedule_deletion`; expose it as the public API of the deletion service.
-- Tests: survives restart, deleted once, TTL 0 schedules nothing, album members all scheduled, recovered request replies scheduled.
-- Audit 2026-09-25 (binding, supersedes conflicting bullets above):
-- Reuse check: `jobs` table does not fit (recovery dispatches by kind, no due-time index, one row per message). New table justified. Reuse `classify_error` (`reliability.py`) in the sweep.
-- Sweep failure rule: drop the row when `Failure.retryable` is False (Forbidden, BadRequest, unexpected). Keep it on retryable errors; stop the sweep on RetryAfter. Cap 50 rows per tick. Supersedes "removes rows even when deletion fails".
-- Public API: `schedule(chat_id, message_id, delay_seconds)`. `INSERT OR IGNORE` so replays and recovery never push a deadline out. `delete_at` is an epoch integer, migration 14.
-- Service lives in new `message_deletion.py`; `RetrievalService` takes optional `deletion` (None in existing tests, no scheduling) and computes the delay from the TTL setting; 0 skips.
-- Reply sites to route through one helper: `handle_update` (7), `cancel` (4), `_execute` summary, `_reply_too_many`, `RecoveredRequestMessage.reply_text` (return the sent message).
-- Schedule the user's request message only after `enqueue` succeeds, not for wrong-topic rejects. Deleting user messages needs bot `can_delete_messages`; Forbidden is dropped and counted in metric `scheduled_deletions_failed`.
-- Schedule delivered copies right after `update_retrieval_item(..., "sent")`, two sites: album chunk loop and `_deliver_single`. A crash between copy and schedule leaks one message; accepted.
-- Tests dispatched: prompts must list exact import paths (`miki_sorter_bot.*`), and use the `database_connection` fixture directly. Past DeepSeek defects: invented paths, fixture passed as arg.
-- Handoff: `message_deletion.py` `MessageDeletionService.schedule/sweep`, `make_sweep_job` (60s, wired in `main.py`). Table `scheduled_deletions` (migration 14), repo `schedule_deletion/due_deletions/remove_deletion`. Specs `request_response_ttl_hours`, `request_delete_user_message`. `RetrievalService(deletion=)` routes replies via `_reply`, schedules copies and request message. Phase 6 notices call `deletion.schedule`. Post-audit: TTL capped 48h (Telegram limit), retryable failures re-queue +300s, `_schedule` is best-effort, indexer cache fills only when enabled. DeepSeek output clean; hand edits: imports, `__init__` param, `_reply` substitutions, `_schedule_request(chat_id, message_id)` signature, test expectations. Next: phase 5.
-
-## Phase 4b — Duplicate media link [x] DONE
-- Extends: `MessageIndexer.index` (stores `posts.file_unique_id`, migration 15), `SortingService` post-copy path. Backup and sorting unchanged; duplicates are still archived and backed up.
-- `SqliteRepositories.find_duplicate` returns the oldest earlier available post with the same `file_unique_id` and a different `logical_post_key`.
-- `_notify_duplicate` replies to the source message with a `post_link` to the earlier archive copy; once per album; best-effort, metric `duplicate_notice_failures`. Spec `duplicate_notice_enabled` (default on).
-- Limits: exact file match only (re-encoded or cropped copies differ); posts indexed before migration 15 have no id until re-crawled; burner backfill records ids but sends no notice.
-- Known gaps (accepted): link may not open for members outside the archive chat; notice is not auto-deleted; `_backed_up` dedupe is RAM-only (restart may re-back-up); crash between copy and deletion scheduling leaks one message.
-- Handoff: 494 tests (album notice test added), `make verify` green. Hand fixes: `find_duplicate` first select lacked `file_unique_id`, `id < ?` (earlier only), `post_link` strips `-100` only when present, `media_unique_id` guards non-list photo.
-
-## Phase 5 — Topic rotation and closed-topic cleanup [x] DONE
-- Needs: phases 3 and 4 (both DONE; use `MessageDeletionService.schedule` and `TopicActivity.rotation_count/reset_rotation`). Files: new `rotation.py`, `migrations.py`, `repositories.py`, `management.py`, `main.py`, `settings_registry.py`.
-- Extends: `TopicActivity` (count), `source_thread_id` runtime override (same key `/source_set` writes), JobQueue tick, `track_topic_status`.
-- Trigger is one 60s tick job checking count and elapsed time, not a hot-path await. Lock so `/rotate_now` and the tick cannot double rotate.
-- `cycle_started_at` persists as `<thread_id>:<epoch>`; a thread mismatch reads as now, mirroring the phase 3 counter self-heal.
-- Specs: `rotate_enabled`, `rotate_media_threshold` (1000), `rotate_interval_hours` (336), `rotate_topic_title`, `topic_cycle`, `closed_topic_delete_days`.
-- `rotate_topic_title` parser must require `{n}`; a bad title is rejected at `/set`, never at rotation time.
-- Rotate order: create topic, write `source_thread_id`, update explicit `periodic_notice_topics` roster, close old topic, record it, increment `topic_cycle`, audit.
-- If the roster is unset the notice already follows the effective source topic; only rewrite it when explicitly set and containing the old id.
-- Creation failure changes nothing. A failure after creation is audited and the created topic is reported to admins, never silently orphaned.
-- The `topics` table is archive-only. Add `rotated_topics(chat_id, thread_id, cycle, closed_at, deleted_at)` in a migration for Miki-closed source topics.
-- `track_topic_status` sees the close event for the same chat; it must ignore rotated source topics rather than flip archive state.
-- Announce in the old topic and the new topic (pointer message), scheduled through the phase 4 deletion service if temporary.
-- Deletion of closed topics: only rows in `rotated_topics` with `chat_id == source_chat_id`, after the day count, manual confirm in v1, audited.
-- Add `/rotate_now` and `/rotate_status` (admin) registered in the `main.py` handlers dict; both go through `_audit`.
-- Tests: each trigger, first-wins, restart persistence, failed creation keeps cycle 10, next title `Cycle 11`, roster rewrite, archive topics never deleted.
-- Handoff: `rotation.py` `RotationService` (`tick`, `rotate`, `cleanup`, `due_reason`, `status_text`), `make_tick_job` 60s wired in `main.py`. Migration 16 `rotated_topics`; repo `add_rotated_topic/is_rotated_topic/rotated_topics_due_for_deletion/mark_rotated_topic_deleted`. Specs `rotate_enabled` (default off), `rotate_media_threshold`, `rotate_interval_hours`, `rotate_topic_title`, `topic_cycle` (10), `closed_topic_delete_days` (30). Commands `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]` (super-admin). `track_topic_status` ignores rotated source topics. Announcements are permanent (no deletion scheduling). Audit outcomes must be success/denied/failed (DB CHECK); partial rotations are success with `details.problems`. 509 tests, `make verify` green. DeepSeek defects: audit outcomes from my prompt (`failure`/`partial`, silently dropped by `_audit`), dict rows vs tuples, dropped `{n}` braces in tests. Hand edits: splice fix, `main.py`/`management.py` wiring, test fixtures. Next: phase 6.
-
-## Phase 5b — Rotation hardening [x] DONE (audit follow-up to phase 5)
-- Keys: `rotation_retry`=`<retry_at>:<failures>` (300s doubling, cap 6h, tick only; `/rotate_now` bypasses), `rotation_pending`=`<old>:<new>:<cycle>`, `rotation_last` JSON.
-- `rotate` creates topic, persists pending, then `_finish` (idempotent, resumable by tick after crash or failed switch). No second topic is ever created while pending.
-- `_finish` also calls `retarget_bridges(old,new)` so burner bridges follow the live source topic. Only bridges that targeted the old topic move.
-- Interval trigger needs at least one counted post; `due_reason` starts the cycle clock even on an idle topic.
-- Cleanup: missing topic (`BadRequest` topic_id_invalid/not found) counts as deleted; mark failure still counts; preview capped at 30 lines.
-- `run_diagnostics` reads the effective source topic. `/rotate_status` shows pending, backoff, last result, eligible closed topics.
-- Accepted: posts in the old topic between switch and close are unsorted; resume may repeat the pointer message; audit outcome for partial rotation is `success` with `details.problems`.
-- Tests: `tests/test_rotation_hardening.py` (backoff, resume, bridges, cleanup, handlers, wiring), sorting-to-rotation test in `tests/test_topic_activity_sorting.py`. 529 tests, `make verify` green.
-- DeepSeek defects: dropped imports, invented `live.set`, wrong fake clock and `main` wiring test from my prompt. Hand edits: imports, test fixtures, `BadRequest` import, `get_runtime_setting` on `test_main` stub.
-
-## Phase 5c — Rotation milestone notices [x] DONE
-- Extends `RotationService.tick`; sends before the due check. Spec `rotate_milestones_enabled` (default on). Needs `rotate_enabled`.
-- Media notices at 80/90/100% of `rotate_media_threshold`; time notices at 80/90/100% of the interval, only once the cycle has a post; extra "within 24 hours" notice when interval > 2 days.
-- State `rotation_milestones`=`<thread>:<cycle>:<labels>`; resets on new thread or cycle. Highest crossed level per kind only (catch-up); labels are marked before sending so failures never repeat.
-- Each notice auto-deletes after 24h via `deletion.schedule` (`RotationService(deletion=)`, wired in `main.py`). 100% notice posts, then rotation runs in the same tick.
-- Tests: `tests/test_rotation_milestones.py`. 539 tests, `make verify` green. Deployed 2026-09-25. Hand edits: two test assertions (rotation adds later messages), one unused import.
-- Live test rotation 2026-09-25 reverted: source topic 66512 reopened, `topic_cycle` unset (default 10, next is `Cycle 11`), rotated_topics row removed. Test topic 68164 left in place.
+# Carryover
 
 ## Phase 6 — Forwarded-media sender mute [ ] TODO (NEXT)
-- Needs: phase 4 (notice deletion) and phase 1. Files: new `forward_mute.py`, `sorting.py`, `settings_registry.py`, `main.py`.
-- Extends: `Management._is_admin` (exempt admins and managers), `_audit`, phase 4 `schedule_deletion`, sorting entry `handle_update`.
-- Check `forward_origin` on the message (PTB >= 21.4). Only origin type `user` counts; `hidden_user`, `chat`, `channel` are skipped.
-- Scope: the effective source topic and forwarding-pair source topics, i.e. the same predicate sorting uses to decide it handles a message.
-- Run before notice counting, look-back capture, backup and sorting, so offenders never count or reach routing.
-- Every album member is deleted on arrival (members are separate updates). Mute and notice fire once per (chat, user) within a short window.
-- Order: delete the message, then `restrict_chat_member`, then audit, then tagged notice scheduled +24h. All calls best-effort, failures audited.
+- Needs phases 4 and 1 (done). Start of session: read this file, run `make test`. End: tick the phase, fill Handoff, commit.
+- Files: new `forward_mute.py`, `sorting.py`, `settings_registry.py`, `main.py`, `docs/codebase-map.md`.
+- Extends `Management._is_admin` (exempt admins and managers), `_audit`, `MessageDeletionService.schedule`, and sorting entry `handle_update`.
+- Locked: delete the media first, then restrict the sender, then post a tagged reason notice deleted after 24h.
+- Check `forward_origin` (PTB >= 21.4). Only origin type `user` counts; `hidden_user`, `chat`, `channel` are skipped.
+- Scope: the effective source topic and forwarding-pair source topics, the same predicate sorting uses. Run before counting, look-back, backup and sorting.
+- Every album member is deleted on arrival. Mute and notice fire once per (chat, user) within a short window.
 - Settings: `forward_mute_enabled`, `forward_mute_minutes`, `forward_mute_reason` as `SettingSpec`s, editable text via `/set`.
+- Needs bot rights Delete Messages and Restrict Members (currently missing). Open: notice posts in the source topic tagging the user, since bots cannot DM non-starters.
 - Tests: delete precedes restrict, album fully deleted, admin and manager exempt, hidden sender skipped, API errors audited, one mute per album, never backed up.
 - Handoff:
