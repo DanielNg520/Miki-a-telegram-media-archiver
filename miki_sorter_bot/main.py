@@ -145,7 +145,12 @@ def _run(settings: Settings) -> None:
         await _notify_operators(context.application, settings, text)
 
     rotation = RotationService(
-        settings, repositories, live_settings, activity, notify=notify_rotation
+        settings,
+        repositories,
+        live_settings,
+        activity,
+        notify=notify_rotation,
+        deletion=deletion,
     )
     retrieval = RetrievalService(
         settings, repositories, delivery_executor, live_settings=live_settings, deletion=deletion

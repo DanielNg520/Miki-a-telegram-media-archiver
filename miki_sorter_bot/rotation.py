@@ -47,6 +47,7 @@ class RotationService:
         *,
         clock: Callable[[], float] = time.time,
         notify: Callable[[Any, str], Awaitable[None]] | None = None,
+        deletion: Any | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -54,6 +55,7 @@ class RotationService:
         self._activity = activity
         self._clock = clock
         self._notify = notify
+        self._deletion = deletion
         self._lock = asyncio.Lock()
 
     def _pending(self) -> tuple[int, int, int] | None:
@@ -232,6 +234,122 @@ class RotationService:
                 pass
 
         return "\n".join(lines)
+
+    def _milestones_sent(self) -> set[str]:
+        raw = self._repositories.get_runtime_setting("rotation_milestones")
+        if raw is None:
+            return set()
+        try:
+            thread_str, cycle_str, labels_str = raw.split(":", 2)
+            thread_id = int(thread_str)
+            cycle = int(cycle_str)
+        except (ValueError, TypeError):
+            LOGGER.warning("Malformed rotation_milestones state", exc_info=True)
+            return set()
+        if thread_id != self._live.effective_source_thread_id():
+            return set()
+        if cycle != self._live.topic_cycle():
+            return set()
+        labels = {label.strip() for label in labels_str.split(",") if label.strip()}
+        return labels
+
+    def _mark_milestones(self, labels: set[str]) -> None:
+        announced = self._milestones_sent()
+        announced.update(labels)
+        thread_id = self._live.effective_source_thread_id()
+        cycle = self._live.topic_cycle()
+        raw_labels = ",".join(sorted(announced))
+        try:
+            self._repositories.set_runtime_setting(
+                "rotation_milestones",
+                f"{thread_id}:{cycle}:{raw_labels}",
+            )
+        except Exception:
+            LOGGER.warning("Failed to persist rotation_milestones", exc_info=True)
+
+    def _due_milestones(self) -> tuple[set[str], list[str]]:
+        if not self._live.rotate_enabled():
+            return set(), []
+        if not self._live.rotate_milestones_enabled():
+            return set(), []
+        thread_id = self._live.effective_source_thread_id()
+        if thread_id == 0:
+            return set(), []
+        announced = self._milestones_sent()
+        labels: set[str] = set()
+        messages: list[str] = []
+        next_title = self._live.rotate_topic_title().format(n=self._live.topic_cycle() + 1)
+        threshold = self._live.rotate_media_threshold()
+        if threshold > 0:
+            count = self._activity.rotation_count()
+            crossed_levels = [level for level in (80, 90, 100) if count * 100 >= level * threshold]
+            if crossed_levels:
+                highest = crossed_levels[-1]
+                new_label = f"media{highest}"
+                if new_label not in announced:
+                    labels.update(f"media{level}" for level in crossed_levels)
+                    if highest == 100:
+                        messages.append(
+                            f"Media threshold reached ({count}/{threshold} posts). "
+                            f"Moving to {next_title} now."
+                        )
+                    else:
+                        messages.append(
+                            f"{highest}% of media threshold reached "
+                            f"({count}/{threshold} posts). Next topic: {next_title}."
+                        )
+        interval = self._live.rotate_interval_seconds()
+        if interval > 0 and self._activity.rotation_count() >= 1:
+            elapsed = int(self._clock()) - self._cycle_started()
+            crossed_levels = [level for level in (80, 90, 100) if elapsed * 100 >= level * interval]
+            if crossed_levels:
+                highest = crossed_levels[-1]
+                new_label = f"time{highest}"
+                if new_label not in announced:
+                    labels.update(f"time{level}" for level in crossed_levels)
+                    if highest == 100:
+                        messages.append(
+                            f"Time interval reached "
+                            f"({elapsed / 3600:.1f}h of {interval / 3600:.1f}h). "
+                            f"Moving to {next_title} now."
+                        )
+                    else:
+                        messages.append(
+                            f"{highest}% of time interval reached "
+                            f"({elapsed / 3600:.1f}h of {interval / 3600:.1f}h). "
+                            f"Next topic: {next_title}."
+                        )
+            if (
+                interval > 2 * 86400
+                and elapsed < interval
+                and interval - elapsed <= 86400
+                and "timeday" not in announced
+            ):
+                labels.add("timeday")
+                messages.append(f"This topic rotates within 24 hours. Next topic: {next_title}.")
+        return labels, messages
+
+    async def _announce_milestones(self, context) -> None:
+        labels, messages = self._due_milestones()
+        if not labels and not messages:
+            return
+        self._mark_milestones(labels)
+        thread_id = self._live.effective_source_thread_id()
+        for text in messages:
+            try:
+                sent = await context.bot.send_message(
+                    chat_id=self._settings.source_chat_id,
+                    message_thread_id=thread_id,
+                    text=text,
+                )
+                if self._deletion is not None:
+                    self._deletion.schedule(
+                        self._settings.source_chat_id,
+                        sent.message_id,
+                        86400,
+                    )
+            except Exception:
+                LOGGER.warning("Failed to post milestone notice", exc_info=True)
 
     async def _tell(self, context, text: str) -> None:
         if self._notify is None:
@@ -522,6 +640,7 @@ class RotationService:
         if self._pending() is not None:
             await self.rotate(context, actor="system", reason="resume")
             return
+        await self._announce_milestones(context)
         reason = self.due_reason()
         if reason is None:
             return

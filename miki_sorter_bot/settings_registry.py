@@ -467,6 +467,14 @@ def default_registry() -> SettingsRegistry:
                 lambda s: int(getattr(s, "topic_cycle", 10)),
             ),
             SettingSpec(
+                "rotate_milestones_enabled",
+                "rotation",
+                "Post 80%, 90% and 100% progress notices (media count and time) and a 24-hours-left notice in the source topic before a rotation; each notice auto-deletes after 24 hours.",
+                parse_bool,
+                render_bool,
+                lambda s: bool(getattr(s, "rotate_milestones_enabled", True)),
+            ),
+            SettingSpec(
                 "closed_topic_delete_days",
                 "rotation",
                 "Days after which closed rotated topics become eligible for manual deletion; 0 disables.",
@@ -567,6 +575,9 @@ class LiveSettings:
 
     def rotate_enabled(self) -> bool:
         return bool(self.get("rotate_enabled"))
+
+    def rotate_milestones_enabled(self) -> bool:
+        return bool(self.get("rotate_milestones_enabled"))
 
     def rotate_media_threshold(self) -> int:
         return int(self.get("rotate_media_threshold"))

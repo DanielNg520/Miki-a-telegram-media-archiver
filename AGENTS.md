@@ -196,6 +196,14 @@ Phases are ordered by dependency. Do not start a phase whose "Needs" phases are 
 - Tests: `tests/test_rotation_hardening.py` (backoff, resume, bridges, cleanup, handlers, wiring), sorting-to-rotation test in `tests/test_topic_activity_sorting.py`. 529 tests, `make verify` green.
 - DeepSeek defects: dropped imports, invented `live.set`, wrong fake clock and `main` wiring test from my prompt. Hand edits: imports, test fixtures, `BadRequest` import, `get_runtime_setting` on `test_main` stub.
 
+## Phase 5c — Rotation milestone notices [x] DONE
+- Extends `RotationService.tick`; sends before the due check. Spec `rotate_milestones_enabled` (default on). Needs `rotate_enabled`.
+- Media notices at 80/90/100% of `rotate_media_threshold`; time notices at 80/90/100% of the interval, only once the cycle has a post; extra "within 24 hours" notice when interval > 2 days.
+- State `rotation_milestones`=`<thread>:<cycle>:<labels>`; resets on new thread or cycle. Highest crossed level per kind only (catch-up); labels are marked before sending so failures never repeat.
+- Each notice auto-deletes after 24h via `deletion.schedule` (`RotationService(deletion=)`, wired in `main.py`). 100% notice posts, then rotation runs in the same tick.
+- Tests: `tests/test_rotation_milestones.py`. 539 tests, `make verify` green. Deployed 2026-09-25. Hand edits: two test assertions (rotation adds later messages), one unused import.
+- Live test rotation 2026-09-25 reverted: source topic 66512 reopened, `topic_cycle` unset (default 10, next is `Cycle 11`), rotated_topics row removed. Test topic 68164 left in place.
+
 ## Phase 6 — Forwarded-media sender mute [ ] TODO (NEXT)
 - Needs: phase 4 (notice deletion) and phase 1. Files: new `forward_mute.py`, `sorting.py`, `settings_registry.py`, `main.py`.
 - Extends: `Management._is_admin` (exempt admins and managers), `_audit`, phase 4 `schedule_deletion`, sorting entry `handle_update`.
