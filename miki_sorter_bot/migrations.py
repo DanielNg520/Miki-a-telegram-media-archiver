@@ -478,6 +478,20 @@ MIGRATIONS = (
         );
         """,
     ),
+    Migration(
+        18,
+        "backup_files_topic",
+        """
+        DROP TABLE backup_files;
+        CREATE TABLE backup_files (
+            file_unique_id TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            topic_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (file_unique_id, chat_id, topic_id)
+        );
+        """,
+    ),
 )
 
 

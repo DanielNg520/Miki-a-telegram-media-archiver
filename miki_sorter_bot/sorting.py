@@ -1327,13 +1327,13 @@ class SortingService:
             LOGGER.warning("Backup copy failed (%s): %s", classify_error(error).category, error)
             return False
 
-    def _record_backup_success(self, msg: Any, backup_chat_id: int) -> None:
+    def _record_backup_success(self, msg: Any, backup_chat_id: int, destination_topic: int) -> None:
         self._backed_up[(msg.chat_id, msg.message_id)] = None
         detected = media_type(msg)
         unique_id = media_unique_id(msg, detected) if detected else None
         if unique_id:
             try:
-                self._repositories.record_backup_file(backup_chat_id, unique_id)
+                self._repositories.record_backup_file(backup_chat_id, destination_topic, unique_id)
             except Exception as error:
                 LOGGER.warning("Recording backup file failed: %s", error)
 
@@ -1365,7 +1365,9 @@ class SortingService:
                 unique_id = media_unique_id(msg, detected) if detected else None
                 if unique_id and (
                     unique_id in seen_unique_ids
-                    or self._repositories.has_backup_file(backup_chat_id, unique_id)
+                    or self._repositories.has_backup_file(
+                        backup_chat_id, destination_topic, unique_id
+                    )
                 ):
                     continue
                 pending.append(msg)
@@ -1380,7 +1382,7 @@ class SortingService:
                 if await self._copy_one_to_backup(
                     pending[0], context, backup_chat_id, destination_topic
                 ):
-                    self._record_backup_success(pending[0], backup_chat_id)
+                    self._record_backup_success(pending[0], backup_chat_id, destination_topic)
                     backed_up_count = 1
             else:
                 captions = tuple(
@@ -1397,7 +1399,7 @@ class SortingService:
                         )
                         sent_count = len(sent)
                         for msg in pending[:sent_count]:
-                            self._record_backup_success(msg, backup_chat_id)
+                            self._record_backup_success(msg, backup_chat_id, destination_topic)
                         backed_up_count = sent_count
                     except Exception as e:
                         LOGGER.warning(
@@ -1408,14 +1410,14 @@ class SortingService:
                             if await self._copy_one_to_backup(
                                 msg, context, backup_chat_id, destination_topic
                             ):
-                                self._record_backup_success(msg, backup_chat_id)
+                                self._record_backup_success(msg, backup_chat_id, destination_topic)
                                 backed_up_count += 1
                 else:
                     for msg in pending:
                         if await self._copy_one_to_backup(
                             msg, context, backup_chat_id, destination_topic
                         ):
-                            self._record_backup_success(msg, backup_chat_id)
+                            self._record_backup_success(msg, backup_chat_id, destination_topic)
                             backed_up_count += 1
 
             while len(self._backed_up) > 5000:

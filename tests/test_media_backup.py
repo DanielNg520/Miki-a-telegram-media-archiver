@@ -481,16 +481,17 @@ def test_backup_file_repository_roundtrip(database_connection):
     repositories = SqliteRepositories(database_connection)
     chat = -1004365154840
 
-    assert repositories.has_backup_file(chat, "u-repo") is False
+    assert repositories.has_backup_file(chat, 2, "u-repo") is False
 
-    repositories.record_backup_file(chat, "u-repo")
-    assert repositories.has_backup_file(chat, "u-repo") is True
-    assert repositories.has_backup_file(-999, "u-repo") is False
+    repositories.record_backup_file(chat, 2, "u-repo")
+    assert repositories.has_backup_file(chat, 2, "u-repo") is True
+    assert repositories.has_backup_file(chat, 3, "u-repo") is False
+    assert repositories.has_backup_file(-999, 2, "u-repo") is False
 
-    repositories.record_backup_file(chat, "u-repo")
+    repositories.record_backup_file(chat, 2, "u-repo")
 
-    repositories.record_backup_file(chat, "")
-    assert repositories.has_backup_file(chat, "") is False
+    repositories.record_backup_file(chat, 2, "")
+    assert repositories.has_backup_file(chat, 2, "") is False
 
     count = database_connection.execute("SELECT COUNT(*) FROM backup_files").fetchone()[0]
     assert count == 1
@@ -514,4 +515,30 @@ def test_backup_dedup_ignores_messages_without_unique_id(database_connection):
     _run(service._backup_to_second_group((msg1,), context))
     _run(service._backup_to_second_group((msg2,), context))
 
+    assert bot.copy_message.await_count == 2
+
+
+def test_same_file_backed_up_once_per_destination_topic(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    service = _service(repositories)
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(),
+        forward_message=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    msg_1 = _message("x #asian", message_id=1, unique_id="same")
+    _run(service._backup_to_second_group((msg_1,), context))
+    assert bot.copy_message.await_count == 1
+    assert bot.copy_message.await_args.kwargs["message_thread_id"] == 3
+
+    msg_2 = _message("x #jav", message_id=2, unique_id="same")
+    _run(service._backup_to_second_group((msg_2,), context))
+    assert bot.copy_message.await_count == 2
+    assert bot.copy_message.await_args.kwargs["message_thread_id"] == 2
+
+    msg_3 = _message("x #jav", message_id=3, unique_id="same")
+    _run(service._backup_to_second_group((msg_3,), context))
     assert bot.copy_message.await_count == 2
