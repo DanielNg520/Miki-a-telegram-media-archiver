@@ -940,6 +940,32 @@ class SqliteRepositories:
         ).fetchone()
         return row is not None
 
+    def has_backup_file(self, chat_id: int, file_unique_id: str) -> bool:
+        if not file_unique_id:
+            return False
+        row = self._connection.execute(
+            """
+            SELECT 1
+            FROM backup_files
+            WHERE file_unique_id = ? AND chat_id = ?
+            LIMIT 1
+            """,
+            (file_unique_id, chat_id),
+        ).fetchone()
+        return row is not None
+
+    def record_backup_file(self, chat_id: int, file_unique_id: str) -> None:
+        if not file_unique_id:
+            return
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO backup_files (file_unique_id, chat_id)
+                VALUES (?, ?)
+                """,
+                (file_unique_id, chat_id),
+            )
+
     def get_post_tokens(self, post_id: int) -> frozenset[SearchToken]:
         rows = self._connection.execute(
             """

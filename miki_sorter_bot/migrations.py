@@ -466,6 +466,18 @@ MIGRATIONS = (
         CREATE INDEX idx_rotated_topics_chat_closed ON rotated_topics(chat_id, closed_at);
         """,
     ),
+    Migration(
+        17,
+        "backup_files",
+        """
+        CREATE TABLE backup_files (
+            file_unique_id TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (file_unique_id, chat_id)
+        );
+        """,
+    ),
 )
 
 
