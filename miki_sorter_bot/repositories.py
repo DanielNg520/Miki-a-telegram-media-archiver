@@ -925,6 +925,21 @@ class SqliteRepositories:
         ).fetchone()
         return _indexed_post_record(duplicate_row) if duplicate_row is not None else None
 
+    def has_duplicate_file(self, file_unique_id: str) -> bool:
+        if not file_unique_id:
+            return False
+        row = self._connection.execute(
+            """
+            SELECT id
+            FROM posts
+            WHERE file_unique_id = ?
+                AND is_available = 1
+            LIMIT 1
+            """,
+            (file_unique_id,),
+        ).fetchone()
+        return row is not None
+
     def get_post_tokens(self, post_id: int) -> frozenset[SearchToken]:
         rows = self._connection.execute(
             """

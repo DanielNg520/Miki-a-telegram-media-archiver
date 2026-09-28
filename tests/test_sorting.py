@@ -2219,63 +2219,28 @@ async def _run_sort_with_duplicate_first(
     return first_message, second_message, bot
 
 
-def test_same_unique_id_replies_to_second_message_with_archive_link(database_connection) -> None:
+def test_same_unique_id_skips_copying_second_message(database_connection) -> None:
     async def scenario():
         first_message, second_message, bot = await _run_sort_with_duplicate_first(
             database_connection,
             second_unique_id="uniq-1",
         )
+        assert bot.copy_message.await_count == 1
         first_message.reply_text.assert_not_called()
-        second_message.reply_text.assert_called_once()
-        reply_text = second_message.reply_text.call_args.args[0]
-        assert "already posted" in reply_text
-        assert "https://t.me/c/200/9/99" in reply_text
-        assert second_message.reply_text.call_args.kwargs.get("do_quote") is True
-        assert bot.copy_message.await_count == 2
+        second_message.reply_text.assert_not_called()
 
     asyncio.run(scenario())
 
 
-def test_different_unique_ids_no_notice(database_connection) -> None:
+def test_different_unique_ids_copies_both(database_connection) -> None:
     async def scenario():
         first_message, second_message, bot = await _run_sort_with_duplicate_first(
             database_connection,
             second_unique_id="uniq-2",
         )
+        assert bot.copy_message.await_count == 2
         first_message.reply_text.assert_not_called()
         second_message.reply_text.assert_not_called()
-        assert bot.copy_message.await_count == 2
-
-    asyncio.run(scenario())
-
-
-def test_duplicate_notice_disabled_skips_reply_but_copies_both(database_connection) -> None:
-    async def scenario():
-        first_message, second_message, bot = await _run_sort_with_duplicate_first(
-            database_connection,
-            second_unique_id="uniq-1",
-            duplicate_notice_enabled=False,
-        )
-        first_message.reply_text.assert_not_called()
-        second_message.reply_text.assert_not_called()
-        assert bot.copy_message.await_count == 2
-
-    asyncio.run(scenario())
-
-
-def test_reply_failure_counts_metric_and_sort_still_succeeds(database_connection) -> None:
-    async def scenario():
-        repositories = SqliteRepositories(database_connection)
-        first_message, second_message, bot = await _run_sort_with_duplicate_first(
-            database_connection,
-            second_unique_id="uniq-1",
-            reply_side_effect=RuntimeError("reply boom"),
-        )
-        metrics = repositories.metrics_snapshot()
-        assert metrics.get("duplicate_notice_failures") == 1
-        assert bot.copy_message.await_count == 2
-        assert first_message.reply_text.await_count == 0
-        assert second_message.reply_text.await_count == 1
 
     asyncio.run(scenario())
 
@@ -2284,16 +2249,14 @@ def test_post_link_formats_archive_link() -> None:
     assert post_link(-1001234567890, 7, 42) == "https://t.me/c/1234567890/7/42"
 
 
-def test_duplicate_in_album_notifies_once_on_first_member(database_connection) -> None:
+def test_duplicate_in_album_filters_duplicate_member(database_connection) -> None:
     repositories = SqliteRepositories(database_connection)
     _routes(repositories)
     service = SortingService(_settings(), repositories, IndexingService(_settings(), repositories))
     bot = SimpleNamespace(
         id=50,
         copy_message=AsyncMock(return_value=SimpleNamespace(message_id=99)),
-        send_media_group=AsyncMock(
-            return_value=[SimpleNamespace(message_id=90), SimpleNamespace(message_id=91)]
-        ),
+        send_media_group=AsyncMock(return_value=[SimpleNamespace(message_id=90)]),
         copy_messages=AsyncMock(),
     )
     context = SimpleNamespace(bot=bot)
@@ -2319,7 +2282,11 @@ def test_duplicate_in_album_notifies_once_on_first_member(database_connection) -
 
     asyncio.run(run())
 
-    members[0].reply_text.assert_awaited_once()
-    assert "https://t.me/c/200/9/99" in members[0].reply_text.await_args.args[0]
-    members[1].reply_text.assert_not_awaited()
-    first.reply_text.assert_not_awaited()
+    # Only first gets copied originally
+    # Then album has 2 members, but member 0 is duplicate.
+    # So member 1 is copied alone! A single member uses copy_message instead of send_media_group!
+    assert bot.copy_message.await_count == 2
+    bot.send_media_group.assert_not_called()
+    members[0].reply_text.assert_not_called()
+    members[1].reply_text.assert_not_called()
+    first.reply_text.assert_not_called()

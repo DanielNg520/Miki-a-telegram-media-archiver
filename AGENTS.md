@@ -70,9 +70,9 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - `RetrievalService(deletion=)` routes replies through `_reply` and schedules copies and the request message. A crash between copy and schedule leaks one message (accepted).
 
 ## Duplicate media link (phase 4b)
-- `posts.file_unique_id` (migration 15). `find_duplicate` returns the oldest earlier available post with the same file and a different `logical_post_key`.
-- `_notify_duplicate` replies once per album with a link to the archive copy; spec `duplicate_notice_enabled`; metric `duplicate_notice_failures`.
-- Limits: exact file match only; posts indexed before migration 15 have no id; the notice is not auto-deleted; the link may not open outside the archive chat.
+- `posts.file_unique_id` (migration 15). `has_duplicate_file` checks for an earlier available post with the same file.
+- Duplicates are silently skipped before being archived or forwarded. `duplicate_notice_enabled` spec remains but unused.
+- Limits: exact file match only; posts indexed before migration 15 have no id.
 
 ## Topic rotation (phases 5, 5b, 5c)
 - `RotationService` (`rotation.py`): 60s tick rotates the source topic at `rotate_media_threshold` posts or `rotate_interval_hours`, whichever first. Ships off.
