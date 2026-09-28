@@ -791,12 +791,18 @@ class SortingService:
         fallback. Shared by the album flush path and look-back delivery."""
 
         filtered_messages: list[Any] = []
+        seen_unique_ids: set[str] = set()
         for message in messages:
             detected_media = media_type(message)
             file_unique_id = media_unique_id(message, detected_media) if detected_media else None
-            if file_unique_id and self._repositories.has_duplicate_file(file_unique_id):
+            if file_unique_id and (
+                file_unique_id in seen_unique_ids
+                or self._repositories.has_duplicate_file(file_unique_id)
+            ):
                 self._repositories.increment_metric("sort_duplicates", 1)
             else:
+                if file_unique_id:
+                    seen_unique_ids.add(file_unique_id)
                 filtered_messages.append(message)
 
         messages = tuple(filtered_messages)
@@ -1338,9 +1344,15 @@ class SortingService:
             if destination_topic is None:
                 return
 
-            pending = [
-                msg for msg in messages if (msg.chat_id, msg.message_id) not in self._backed_up
-            ]
+            pending = []
+            for msg in messages:
+                if (msg.chat_id, msg.message_id) in self._backed_up:
+                    continue
+                detected = media_type(msg)
+                unique_id = media_unique_id(msg, detected) if detected else None
+                if unique_id and self._repositories.has_duplicate_file(unique_id):
+                    continue
+                pending.append(msg)
             if not pending:
                 return
 
