@@ -11,11 +11,11 @@ user-account layer see [burner-layer.md](burner-layer.md).
 | Module | Responsibility |
 |---|---|
 | `main.py` | Composition root. Builds the PTB `Application`, wires handlers, schedules the repeating/daily jobs, and runs polling or webhook mode. |
-| `sorting.py` | `SortingService` — eligibility, route resolution/precedence, album buffering + flush timers, durable idempotent delivery. |
+| `sorting.py` | `SortingService` — eligibility, route resolution/precedence, album buffering + flush timers, durable idempotent delivery. `_backup_to_second_group` copies `#JAV`/`#Asian` media to a backup group, deduped in RAM and per file, chat and topic in `backup_files` (migrations 17-18); recording is best-effort. |
 | `topic_activity.py` | `TopicActivity` — shared album dedup and the persisted `rotation_media_count` (`<thread>:<n>` in runtime settings); called once per media post from `sorting.py`. |
 | `message_deletion.py` | `MessageDeletionService` — persisted timed deletion queue (`scheduled_deletions`, migration 14); `schedule(chat_id, message_id, delay_seconds)`, 60s sweep job. Used by `retrieval.py` for the request-response TTL. |
 | `rotation.py` | `RotationService` — rotates the source topic on media count or elapsed hours (60s tick). Persists `cycle_started_at`, `topic_cycle`, `rotated_topics` (migration 16). `/rotate_now`, `/rotate_status`, `/rotate_cleanup [confirm]`. Failure backoff, resumable pending rotation, retargets burner bridges, 80/90/100% milestone notices (auto-deleted via `message_deletion.py`). |
-| `indexing.py` (duplicates) | `media_unique_id` stores `posts.file_unique_id`; `find_duplicate` in `repositories.py`; `sorting.py` `_notify_duplicate` links the earlier archive copy. |
+| `indexing.py` (duplicates) | `media_unique_id` stores `posts.file_unique_id`; `find_duplicate` in `repositories.py`; `repositories.has_duplicate_file` lets `sorting.py` silently skip a repeat file before archiving; repeats inside one album are dropped too. |
 | `routing.py` | `Route` value type and route matching primitives. |
 | `indexing.py` | `MessageIndexer` (duck-typed message → indexed post + tokens), `IndexingService`, the deterministic token `extract_search_tokens`, and `/reindex`. `MessageIndexer(cache_mappings=True)` caches mappings per instance; only burner crawls enable it. |
 | `scripts/bench_indexing.py` | Standalone indexing benchmark (not packaged, not in `make verify`). Run with `TMPDIR` on a real disk, since `/tmp` may be tmpfs. |
@@ -27,7 +27,7 @@ user-account layer see [burner-layer.md](burner-layer.md).
 |---|---|
 | `storage.py` | `Storage` — connection lifecycle (WAL, FK, busy-timeout), online backup/restore + verification. |
 | `repositories.py` | `SqliteRepositories` — the single SQL adapter behind repository protocols; all tables live here. |
-| `migrations.py` | Forward-only, immutable migrations (currently 13). |
+| `migrations.py` | Forward-only, immutable migrations (currently 18). |
 | `config.py` | Pydantic `Settings` — env parsing/validation, the source of truth for `.env` keys and derived properties. |
 | `settings_registry.py` | Runtime-tunable knobs (`/config` `/set` `/reset`) with read-through `LiveSettings`, self-healing on poisoned overrides. |
 
