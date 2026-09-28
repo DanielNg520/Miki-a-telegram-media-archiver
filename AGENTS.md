@@ -50,7 +50,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 ## Backup to second group and sender removal (phase 1)
 - `Sorting` copies `#JAV` media to topic 2 and `#Asian` to topic 3 of the backup group; JAV wins. Whole-tag match via `HASHTAG_RE`.
 - Specs `media_backup_chat_id`, `media_backup_tag_topics`. Captions lose @mentions and links (UTF-16 aware); copies show no sender.
-- Dedupe per `(chat_id, message_id)` in RAM (5000; a restart may re-back-up). Failures count in metric `media_backup_failures`.
+- Dedupe per `(chat_id, message_id)` in RAM (5000; a restart may re-back-up) and per `file_unique_id` in `backup_files` table (migration 17). Failures count in metric `media_backup_failures`.
 - Albums copy inside `_album_send_gate` (one album upload at a time).
 
 ## Index write speed (phase 2)
@@ -70,9 +70,9 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - `RetrievalService(deletion=)` routes replies through `_reply` and schedules copies and the request message. A crash between copy and schedule leaks one message (accepted).
 
 ## Duplicate media link (phase 4b)
-- `posts.file_unique_id` (migration 15). `has_duplicate_file` checks for an earlier available post with the same file.
+- `posts.file_unique_id` (migration 15). `has_duplicate_file` checks for an earlier available post with the same file in the archive.
 - Duplicates are silently skipped before being archived or forwarded. `duplicate_notice_enabled` spec remains but unused.
-- Limits: exact file match only; posts indexed before migration 15 have no id.
+- Limits: exact file match only; posts indexed before migration 15 have no id. Archive dedupe and backup dedupe are fully decoupled.
 
 ## Topic rotation (phases 5, 5b, 5c)
 - `RotationService` (`rotation.py`): 60s tick rotates the source topic at `rotate_media_threshold` posts or `rotate_interval_hours`, whichever first. Ships off.
