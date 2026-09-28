@@ -132,10 +132,13 @@ def _archive_checks(
     yield DiagnosticCheck("ok", "routes", f"{len(mappings)} route mapping(s) configured.")
     mapped_topic_ids = {mapping.topic_id for mapping in mappings}
     forwarding_thread_ids = {pair.destination_thread_id for pair in forwarding_pairs}
+    fallback_thread_id = getattr(settings, "default_topic_id", 0)
     unmapped = [
         topic
         for topic in topics
-        if topic.id not in mapped_topic_ids and topic.thread_id not in forwarding_thread_ids
+        if topic.id not in mapped_topic_ids
+        and topic.thread_id not in forwarding_thread_ids
+        and topic.thread_id != fallback_thread_id
     ]
     if unmapped:
         names = ", ".join(f"{topic.name} ({topic.thread_id})" for topic in unmapped[:5])

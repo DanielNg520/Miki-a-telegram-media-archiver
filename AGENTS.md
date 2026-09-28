@@ -18,6 +18,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - After `uv sync` use `--all-extras` or the dev tools vanish.
 - `miki-sorter.service` runs a uv-installed COPY, not the repo. Deploy: back up `var/miki.sqlite3`, `uv tool install --reinstall .`.
 - Then `systemctl --user restart miki-sorter.service` and `miki-doctor`. Migrations are forward-only. Live schema is 18 (2026-09-27).
+- `miki-doctor` skips the `default_topic_id` topic in the unmapped-topics check. Stale dead letters were resolved and failed jobs cancelled 2026-09-28.
 - Bot admin rights on the source group: Manage Topics yes (rotation works), Delete Messages no, Restrict Members no.
 
 ## Dispatch recipe (TriAPI)

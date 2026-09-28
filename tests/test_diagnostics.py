@@ -101,3 +101,26 @@ def test_diagnostics_warns_when_source_activity_is_quiet(database_connection) ->
 
     assert not report.has_errors
     assert "[CHECK] source_activity" in report.format()
+
+
+def test_diagnostics_flags_unrouted_topic_that_is_not_the_default(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "hashtag", "JAV", 1)
+    repositories.register_topic(-200, 10, "Loose")
+
+    report = run_diagnostics(_settings(default_topic_id=9), repositories)
+
+    assert "have no routes" in report.format()
+    assert "Loose (10)" in report.format()
+
+
+def test_diagnostics_ignores_unrouted_default_topic(database_connection) -> None:
+    repositories = SqliteRepositories(database_connection)
+    repositories.register_topic(-200, 9, "Japan")
+    repositories.add_mapping(-200, 9, "hashtag", "JAV", 1)
+    repositories.register_topic(-200, 10, "Default")
+
+    report = run_diagnostics(_settings(default_topic_id=10), repositories)
+
+    assert "have no routes" not in report.format()
