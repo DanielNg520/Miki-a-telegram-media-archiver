@@ -17,7 +17,7 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 - Single file: `python -m pytest tests/test_sorting.py -q`. Format only touched files with `ruff format <files>`.
 - After `uv sync` use `--all-extras` or the dev tools vanish.
 - `miki-sorter.service` runs a uv-installed COPY, not the repo. Deploy: back up `var/miki.sqlite3`, `uv tool install --reinstall .`.
-- Then `systemctl --user restart miki-sorter.service` and `miki-doctor`. Migrations are forward-only. Live schema is 16 (2026-09-25).
+- Then `systemctl --user restart miki-sorter.service` and `miki-doctor`. Migrations are forward-only. Live schema is 17 (2026-09-27).
 - Bot admin rights on the source group: Manage Topics yes (rotation works), Delete Messages no, Restrict Members no.
 
 ## Dispatch recipe (TriAPI)
@@ -50,7 +50,8 @@ Read this first. Update it after every implementation. Max 1000 lines, each line
 ## Backup to second group and sender removal (phase 1)
 - `Sorting` copies `#JAV` media to topic 2 and `#Asian` to topic 3 of the backup group; JAV wins. Whole-tag match via `HASHTAG_RE`.
 - Specs `media_backup_chat_id`, `media_backup_tag_topics`. Captions lose @mentions and links (UTF-16 aware); copies show no sender.
-- Dedupe per `(chat_id, message_id)` in RAM (5000; a restart may re-back-up) and per `file_unique_id` in `backup_files` table (migration 17). Failures count in metric `media_backup_failures`.
+- Dedupe per `(chat_id, message_id)` in RAM (5000) and per `file_unique_id` in `backup_files` (migration 17, not backfilled). Failures count in `media_backup_failures`.
+- Same file twice in one batch is sent once. `_record_backup_success` DB write is best-effort (logged, never raised). Key ignores destination topic: first tag wins.
 - Albums copy inside `_album_send_gate` (one album upload at a time).
 
 ## Index write speed (phase 2)

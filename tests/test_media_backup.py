@@ -19,9 +19,11 @@ def _settings() -> SimpleNamespace:
 
 
 def _message(
-    caption, *, message_id=12, chat_id=-100, entities=None, kind="photo"
+    caption, *, message_id=12, chat_id=-100, entities=None, kind="photo", unique_id=None
 ) -> SimpleNamespace:
     media_object = SimpleNamespace(file_id=f"file-{message_id}")
+    if unique_id is not None:
+        media_object.file_unique_id = unique_id
     return SimpleNamespace(
         message_id=message_id,
         chat_id=chat_id,
@@ -404,3 +406,112 @@ def test_strip_entity_beyond_end_no_raise():
     text = "hi"
     entities = [SimpleNamespace(type="mention", offset=10, length=5)]
     assert _strip_sender_identifiers(text, entities) == "hi"
+
+
+def test_persisted_backup_dedup_survives_new_service(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    service1 = _service(repositories)
+    bot1 = SimpleNamespace(
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(),
+        forward_message=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context1 = SimpleNamespace(bot=bot1)
+    msg1 = _message("photo #jav", unique_id="u1")
+    _run(service1._backup_to_second_group((msg1,), context1))
+
+    service2 = _service(repositories)
+    bot2 = SimpleNamespace(
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(),
+        forward_message=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context2 = SimpleNamespace(bot=bot2)
+    msg2 = _message("photo #jav", message_id=99, unique_id="u1")
+    _run(service2._backup_to_second_group((msg2,), context2))
+
+    assert bot2.copy_message.await_count == 0
+    assert bot1.copy_message.await_count == 1
+
+
+def test_intra_album_duplicate_backed_up_once(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    service = _service(repositories)
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(),
+        forward_message=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    msg1 = _message("photo #jav", message_id=1, unique_id="dup")
+    msg2 = _message("photo #jav", message_id=2, unique_id="dup")
+
+    _run(service._backup_to_second_group((msg1, msg2), context))
+
+    assert bot.copy_message.await_count == 1
+    assert bot.send_media_group.await_count == 0
+
+
+def test_record_failure_does_not_break_backup(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    repositories.record_backup_file = Mock(side_effect=RuntimeError("db locked"))
+    service = _service(repositories)
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(),
+        forward_message=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+    msg = _message("photo #jav", unique_id="u2")
+
+    _run(service._backup_to_second_group((msg,), context))
+
+    assert bot.copy_message.await_count == 1
+    assert repositories.metrics_snapshot().get("media_backup_failures", 0) == 0
+
+    _run(service._backup_to_second_group((msg,), context))
+    assert bot.copy_message.await_count == 1
+
+
+def test_backup_file_repository_roundtrip(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    chat = -1004365154840
+
+    assert repositories.has_backup_file(chat, "u-repo") is False
+
+    repositories.record_backup_file(chat, "u-repo")
+    assert repositories.has_backup_file(chat, "u-repo") is True
+    assert repositories.has_backup_file(-999, "u-repo") is False
+
+    repositories.record_backup_file(chat, "u-repo")
+
+    repositories.record_backup_file(chat, "")
+    assert repositories.has_backup_file(chat, "") is False
+
+    count = database_connection.execute("SELECT COUNT(*) FROM backup_files").fetchone()[0]
+    assert count == 1
+
+
+def test_backup_dedup_ignores_messages_without_unique_id(database_connection):
+    repositories = SqliteRepositories(database_connection)
+    service = _service(repositories)
+
+    bot = SimpleNamespace(
+        copy_message=AsyncMock(),
+        send_media_group=AsyncMock(),
+        forward_message=AsyncMock(),
+        copy_messages=AsyncMock(),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    msg1 = _message("photo #jav", message_id=1)
+    msg2 = _message("photo #jav", message_id=2)
+
+    _run(service._backup_to_second_group((msg1,), context))
+    _run(service._backup_to_second_group((msg2,), context))
+
+    assert bot.copy_message.await_count == 2

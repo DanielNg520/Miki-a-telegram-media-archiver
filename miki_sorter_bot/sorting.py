@@ -1332,7 +1332,10 @@ class SortingService:
         detected = media_type(msg)
         unique_id = media_unique_id(msg, detected) if detected else None
         if unique_id:
-            self._repositories.record_backup_file(backup_chat_id, unique_id)
+            try:
+                self._repositories.record_backup_file(backup_chat_id, unique_id)
+            except Exception as error:
+                LOGGER.warning("Recording backup file failed: %s", error)
 
     async def _backup_to_second_group(
         self, messages: tuple[Any, ...], context: ContextTypes.DEFAULT_TYPE
@@ -1354,14 +1357,20 @@ class SortingService:
             backup_chat_id = self._live.media_backup_chat_id()
 
             pending = []
+            seen_unique_ids: set[str] = set()
             for msg in messages:
                 if (msg.chat_id, msg.message_id) in self._backed_up:
                     continue
                 detected = media_type(msg)
                 unique_id = media_unique_id(msg, detected) if detected else None
-                if unique_id and self._repositories.has_backup_file(backup_chat_id, unique_id):
+                if unique_id and (
+                    unique_id in seen_unique_ids
+                    or self._repositories.has_backup_file(backup_chat_id, unique_id)
+                ):
                     continue
                 pending.append(msg)
+                if unique_id:
+                    seen_unique_ids.add(unique_id)
             if not pending:
                 return
 
